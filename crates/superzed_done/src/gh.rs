@@ -526,7 +526,7 @@ mod tests {
         assert!(l[4].contains(&format!("--body=corpo di Policy\n\n{}", marker(SID, 2))), "{}", l[4]);
         assert!(l[6].ends_with("--single-select-option-id k_blocker"));
         assert!(l[7].ends_with("--single-select-option-id st_blocked"));
-        assert!(l[8].ends_with("--single-select-option-id a_pos"));
+        assert!(l[8].ends_with("--single-select-option-id a_frontend"));
         assert!(l[9].ends_with("--field-id PVTF_waiting --text=design"));
     }
 
