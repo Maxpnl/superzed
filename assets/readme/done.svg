@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .t { fill: #e6e8ee; }
+      .m { fill: #8a93a6; }
+      .d { fill: #5b6476; }
+      .lime { fill: #c6ff3f; }
+      .red { fill: #ff6b6b; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .in1 { animation: in 7s ease-out infinite; }
+      .in2 { animation: in2 7s ease-out infinite; }
+      @keyframes in { 0% { opacity: 0; transform: translateY(8px); } 10%, 92% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+      @keyframes in2 { 0%, 18% { opacity: 0; transform: translateY(8px); } 28%, 92% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+    </style>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#1d2430"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#5b6476"/></marker>
+  </defs>
+
+  <rect width="1200" height="460" rx="14" fill="#0d1017"/>
+  <rect width="1200" height="460" rx="14" fill="url(#grid)"/>
+
+  <!-- notifications column -->
+  <g transform="translate(32 32)">
+    <text x="4" y="14" font-size="11" font-weight="700" letter-spacing="1.2" class="m">NOTIFICATIONS</text>
+    <g transform="translate(0 30)"><g class="in1">
+      <rect width="330" height="108" rx="10" fill="#141922" stroke="#2c3442"/>
+      <rect width="3" height="108" fill="#c6ff3f"/>
+      <text x="18" y="28" font-size="13.5" font-weight="700" class="t">Report ready</text>
+      <text x="312" y="28" font-size="11" text-anchor="end" class="d">now</text>
+      <text x="18" y="50" font-size="12" class="m">Flaky checkout e2e · northwind-checkout</text>
+      <text x="18" y="68" font-size="12" class="m">2 issues touched, 1 new, summary.</text>
+      <rect x="18" y="78" width="68" height="22" rx="5" fill="#c6ff3f"/>
+      <text x="52" y="93" font-size="11.5" font-weight="700" text-anchor="middle" fill="#0d1017">Review</text>
+    </g></g>
+    <g transform="translate(0 154)"><g class="in2">
+      <rect width="330" height="98" rx="10" fill="#141922" stroke="#2c3442"/>
+      <rect width="3" height="98" fill="#ff6b6b"/>
+      <text x="18" y="28" font-size="13.5" font-weight="700" class="t">Payments API 5xx above 2%</text>
+      <text x="312" y="28" font-size="11" text-anchor="end" class="d">4m</text>
+      <text x="18" y="50" font-size="12" class="m">raised by the nightly audit chat</text>
+      <rect x="18" y="64" width="68" height="22" rx="5" fill="#1d2532" stroke="#2c3442"/>
+      <text x="52" y="79" font-size="11.5" text-anchor="middle" class="t">Resolve</text>
+      <text x="98" y="79" font-size="11" class="d">opens a chat in the kanban</text>
+    </g></g>
+    <text x="4" y="296" font-size="11.5" class="m">Claude raises them with <tspan class="mono t">superzed-notify</tspan>;</text>
+    <text x="4" y="314" font-size="11.5" class="m">Done reports, automations and quota</text>
+    <text x="4" y="332" font-size="11.5" class="m">warnings land here too.</text>
+  </g>
+
+  <path d="M372 110 C 400 110, 400 110, 424 110" stroke="#5b6476" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- review modal -->
+  <g transform="translate(432 32)">
+    <rect width="736" height="396" rx="12" fill="#141922" stroke="#2c3442"/>
+    <text x="24" y="38" font-size="17" font-weight="700" class="t">Update GitHub</text>
+    <text x="164" y="38" font-size="12.5" class="m">Flaky checkout e2e</text>
+
+    <text x="24" y="74" font-size="11" font-weight="700" letter-spacing=".8" class="m">TOUCHED ISSUES</text>
+    <g transform="translate(24 86)" font-size="12.5">
+      <rect width="14" height="14" rx="3" class="lime"/><path d="M3 7 l3 3 5 -6" stroke="#0d1017" stroke-width="1.8" fill="none"/>
+      <text x="24" y="11.5" class="lime mono" font-size="12">#142</text>
+      <text x="70" y="11.5" class="t">E2E checkout fails on slow CI runners</text>
+      <text x="380" y="11.5" class="m">comment: root cause + fix in a91c2e4</text>
+    </g>
+    <g transform="translate(24 112)" font-size="12.5">
+      <rect width="14" height="14" rx="3" class="lime"/><path d="M3 7 l3 3 5 -6" stroke="#0d1017" stroke-width="1.8" fill="none"/>
+      <text x="24" y="11.5" class="red mono" font-size="12">#138</text>
+      <text x="70" y="11.5" class="red">Close: waitForPayment sometimes times out</text>
+    </g>
+
+    <text x="24" y="160" font-size="11" font-weight="700" letter-spacing=".8" class="m">NEW ISSUES</text>
+    <g transform="translate(24 172)">
+      <rect width="14" height="14" rx="3" class="lime"/><path d="M3 7 l3 3 5 -6" stroke="#0d1017" stroke-width="1.8" fill="none"/>
+      <rect x="24" y="-2" width="40" height="18" rx="4" fill="#232a36"/><text x="44" y="11" font-size="10.5" text-anchor="middle" class="m">Task</text>
+      <rect x="74" y="-6" width="614" height="26" rx="6" fill="#0d1017" stroke="#2c3442"/>
+      <text x="86" y="11.5" font-size="12.5" class="t">Add a retry budget to payment status polling</text>
+      <rect x="74" y="28" width="614" height="54" rx="6" fill="#0d1017" stroke="#2c3442"/>
+      <text x="86" y="48" font-size="12" class="m">Polling retries forever when the provider is down. Cap it at 5 attempts</text>
+      <text x="86" y="66" font-size="12" class="m">and surface a "payment pending" state to the customer.</text>
+    </g>
+
+    <text x="24" y="282" font-size="11" font-weight="700" letter-spacing=".8" class="m">SUMMARY</text>
+    <g transform="translate(24 294)">
+      <rect width="14" height="14" rx="3" class="lime"/><path d="M3 7 l3 3 5 -6" stroke="#0d1017" stroke-width="1.8" fill="none"/>
+      <text x="24" y="11.5" font-size="12.5" class="t">Session summary on the project board</text>
+    </g>
+
+    <rect x="0" y="332" width="736" height="1" fill="#232a36"/>
+    <text x="24" y="368" font-size="12" class="m">Only this button writes. Enter never confirms.</text>
+    <rect x="370" y="350" width="80" height="30" rx="6" fill="#1d2532" stroke="#2c3442"/>
+    <text x="410" y="369.5" font-size="12.5" text-anchor="middle" class="t">Cancel</text>
+    <rect x="460" y="350" width="252" height="30" rx="6" fill="#c6ff3f"/>
+    <text x="586" y="369.5" font-size="12.5" font-weight="700" text-anchor="middle" fill="#0d1017">Write to GitHub (4), including 1 close</text>
+  </g>
+</svg>

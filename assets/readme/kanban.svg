@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .t { fill: #e6e8ee; }
+      .m { fill: #8a93a6; }
+      .d { fill: #5b6476; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .card { fill: #0b0e14; stroke: #2c3442; }
+      .mover { animation: move 9s cubic-bezier(.65, 0, .35, 1) infinite; }
+      .phase-a { animation: phaseA 9s steps(1) infinite; }
+      .phase-b { animation: phaseB 9s steps(1) infinite; }
+      .phase-c { animation: phaseC 9s steps(1) infinite; }
+      .glow { animation: glow 9s ease-in-out infinite; }
+      @keyframes move {
+        0%, 22% { transform: translate(0, 0); opacity: 1; }
+        30%, 52% { transform: translate(146px, 0); }
+        60%, 90% { transform: translate(292px, 0); opacity: 1; }
+        96% { transform: translate(292px, 0); opacity: 0; }
+        97% { transform: translate(0, 0); opacity: 0; }
+        100% { transform: translate(0, 0); opacity: 1; }
+      }
+      @keyframes phaseA { 0% { opacity: 1; } 26% { opacity: 0; } 100% { opacity: 1; } }
+      @keyframes phaseB { 0% { opacity: 0; } 26% { opacity: 1; } 56% { opacity: 0; } }
+      @keyframes phaseC { 0% { opacity: 0; } 56% { opacity: 1; } 97% { opacity: 0; } }
+      @keyframes glow { 0%, 20%, 32%, 50%, 62%, 100% { stroke-opacity: 0; } 26%, 56% { stroke-opacity: 1; } }
+    </style>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#1d2430"/></pattern>
+  </defs>
+
+  <rect width="1200" height="400" rx="14" fill="#0d1017"/>
+  <rect width="1200" height="400" rx="14" fill="url(#grid)"/>
+
+  <g transform="translate(20 20)">
+    <rect width="1160" height="360" rx="12" fill="#10141c" stroke="#2c3442"/>
+    <path d="M0 12 a12 12 0 0 1 12 -12 h1136 a12 12 0 0 1 12 12 v26 h-1160 z" fill="#161b25"/>
+    <text x="18" y="25" font-size="14" font-weight="700" class="t">kanban</text>
+    <text x="82" y="25" font-size="12" class="m">chats follow their phase as the superpowers skills run</text>
+
+    <g font-size="10.5" font-weight="700" letter-spacing=".5" class="m">
+      <text x="12" y="62">OTHERS</text>
+      <text x="158" y="62">ANALYSIS</text>
+      <text x="304" y="62">NEW</text>
+      <text x="450" y="62">BRAINSTORMING</text>
+      <text x="596" y="62">SPEC</text>
+      <text x="742" y="62">PLAN</text>
+      <text x="888" y="62">IMPLEMENTING</text>
+      <text x="1034" y="62">DONE</text>
+    </g>
+    <g fill="#232a36">
+      <rect x="148" y="48" width="1" height="300"/><rect x="294" y="48" width="1" height="300"/>
+      <rect x="440" y="48" width="1" height="300"/><rect x="586" y="48" width="1" height="300"/>
+      <rect x="732" y="48" width="1" height="300"/><rect x="878" y="48" width="1" height="300"/>
+      <rect x="1024" y="48" width="1" height="300"/>
+    </g>
+
+    <g font-size="11">
+      <g transform="translate(8 76)">
+        <rect width="132" height="70" rx="7" class="card"/>
+        <text x="9" y="20" font-weight="600" class="t">Grafana panel</text>
+        <text x="9" y="36" font-size="9.5" class="d">filed by hand</text>
+      </g>
+      <g transform="translate(154 76)">
+        <rect width="132" height="70" rx="7" class="card"/>
+        <text x="9" y="20" font-weight="600" class="t">Why p95 doubled</text>
+        <text x="9" y="36" font-size="9.5" class="d">read-only analysis</text>
+      </g>
+      <g transform="translate(300 76)">
+        <rect width="132" height="70" rx="7" class="card"/>
+        <text x="9" y="20" font-weight="600" class="t">Currency rounding</text>
+        <text x="9" y="36" font-size="9.5" class="d">work · idle</text>
+      </g>
+      <g transform="translate(300 156)">
+        <rect width="132" height="70" rx="7" class="card" stroke-dasharray="4 4"/>
+        <text x="66" y="40" text-anchor="middle" font-size="18" class="d">+</text>
+      </g>
+      <g transform="translate(446 76)">
+        <rect width="132" height="70" rx="7" fill="#0b0e14" stroke="#f5a524"/>
+        <text x="9" y="20" font-weight="600" class="t">Refund flow</text>
+        <text x="9" y="36" font-size="9.5" fill="#f5a524">needs input</text>
+      </g>
+      <g transform="translate(592 76)">
+        <rect width="132" height="70" rx="7" class="card"/>
+        <text x="9" y="20" font-weight="600" class="t">SSO for admins</text>
+        <text x="9" y="36" font-size="9.5" class="d">personal · 12m</text>
+      </g>
+      <g transform="translate(1030 206)">
+        <rect width="122" height="70" rx="7" class="card"/>
+        <text x="9" y="20" font-weight="600" class="t">Flaky e2e</text>
+        <text x="9" y="36" font-size="9.5" fill="#c6ff3f">Report ready</text>
+      </g>
+
+      <!-- the moving chat -->
+      <g class="mover">
+        <g transform="translate(738 76)">
+          <rect width="126" height="118" rx="7" fill="#0b0e14" stroke="#4cc9f0"/>
+          <rect width="126" height="118" rx="7" fill="none" stroke="#c6ff3f" stroke-width="3" class="glow"/>
+          <text x="9" y="20" font-weight="600" class="t">Webhook retries</text>
+          <text x="9" y="36" font-size="9.5" fill="#4cc9f0">Working · work</text>
+          <g class="mono" font-size="8.5">
+            <text x="9" y="62" class="m phase-a">writing-plans ✓</text>
+            <text x="9" y="62" class="m phase-b">executing-plans…</text>
+            <text x="9" y="62" class="m phase-c">finishing-branch ✓</text>
+            <text x="9" y="78" class="d">src/webhooks/</text>
+            <text x="9" y="92" class="d">stripe.ts +24 −6</text>
+          </g>
+        </g>
+      </g>
+    </g>
+
+    <g transform="translate(12 300)" font-size="11.5">
+      <rect width="1136" height="44" rx="8" fill="#141922"/>
+      <text x="16" y="27" class="m">Drag a chat between columns or press <tspan class="t mono" font-size="11">cmd-shift-→</tspan>. Others and Analysis are yours to fill; <tspan class="t mono" font-size="11">/clear</tspan> sends a chat back to New. Entering Done asks Claude for a report you can push to GitHub.</text>
+    </g>
+  </g>
+</svg>

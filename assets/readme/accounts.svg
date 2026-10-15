@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <style>
+      .t { fill: #e6e8ee; }
+      .m { fill: #8a93a6; }
+      .d { fill: #5b6476; }
+      .lime { fill: #c6ff3f; }
+      .amber { fill: #f5a524; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .sel { animation: sel 6s ease-in-out infinite; }
+      .press { animation: press 6s ease-in-out infinite; }
+      @keyframes sel { 0%, 30% { opacity: 0; } 40%, 100% { opacity: 1; } }
+      @keyframes press { 0%, 18% { fill: #1d2532; } 22%, 28% { fill: #c6ff3f; } 34%, 100% { fill: #1d2532; } }
+    </style>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#1d2430"/></pattern>
+  </defs>
+
+  <rect width="1200" height="440" rx="14" fill="#0d1017"/>
+  <rect width="1200" height="440" rx="14" fill="url(#grid)"/>
+
+  <!-- picker -->
+  <g transform="translate(32 32)">
+    <rect width="600" height="376" rx="12" fill="#141922" stroke="#2c3442"/>
+    <text x="22" y="36" font-size="15" font-weight="700" class="t">Start a chat on…</text>
+    <g transform="translate(470 18)">
+      <rect width="110" height="26" rx="6" class="press" stroke="#2c3442"/>
+      <text x="55" y="17.5" font-size="11.5" text-anchor="middle" class="t mono">cmd-shift-n</text>
+    </g>
+    <g font-size="10.5" font-weight="700" letter-spacing=".6" class="d">
+      <text x="22" y="72">ACCOUNT</text><text x="200" y="72">5H LEFT</text><text x="320" y="72">WEEK LEFT</text><text x="440" y="72">CHATS</text><text x="520" y="72">SCORE</text>
+    </g>
+
+    <g transform="translate(12 84)">
+      <rect width="576" height="58" rx="8" fill="#1a2016"/>
+      <rect width="576" height="58" rx="8" fill="none" stroke="#c6ff3f" stroke-width="1.5" class="sel"/>
+      <text x="12" y="25" font-size="14" font-weight="600" class="t">work</text>
+      <text x="12" y="44" font-size="11" class="m">dev@northwind.example</text>
+      <rect x="188" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="188" y="24" width="58" height="7" rx="3.5" class="lime"/>
+      <text x="188" y="46" font-size="11" class="m">64% · 2h 41m</text>
+      <rect x="308" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="308" y="24" width="38" height="7" rx="3.5" class="lime"/>
+      <text x="308" y="46" font-size="11" class="m">42% · 2d 4h</text>
+      <text x="440" y="32" font-size="13" class="t">1</text>
+      <text x="508" y="32" font-size="13" font-weight="700" class="lime">0.71</text>
+      <g class="sel"><rect x="500" y="38" width="44" height="14" rx="7" fill="#c6ff3f" fill-opacity=".18"/><text x="522" y="48.5" font-size="9" font-weight="700" text-anchor="middle" class="lime">BEST</text></g>
+    </g>
+
+    <g transform="translate(12 150)">
+      <rect width="576" height="58" rx="8" fill="#171c25"/>
+      <text x="12" y="25" font-size="14" font-weight="600" class="t">you</text>
+      <text x="12" y="44" font-size="11" class="m">system account</text>
+      <rect x="188" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="188" y="24" width="81" height="7" rx="3.5" class="lime"/>
+      <text x="188" y="46" font-size="11" class="m">90% · 4h 50m</text>
+      <rect x="308" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="308" y="24" width="69" height="7" rx="3.5" class="lime"/>
+      <text x="308" y="46" font-size="11" class="m">77% · 6d</text>
+      <text x="440" y="32" font-size="13" class="t">3</text>
+      <text x="508" y="32" font-size="13" class="t">0.58</text>
+    </g>
+
+    <g transform="translate(12 216)">
+      <rect width="576" height="58" rx="8" fill="#171c25"/>
+      <text x="12" y="25" font-size="14" font-weight="600" class="t">personal</text>
+      <text x="12" y="44" font-size="11" class="m">me@hey.example</text>
+      <rect x="188" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="188" y="24" width="16" height="7" rx="3.5" class="amber"/>
+      <text x="188" y="46" font-size="11" class="amber">18% · 3h 12m</text>
+      <rect x="308" y="24" width="90" height="7" rx="3.5" fill="#232a36"/><rect x="308" y="24" width="53" height="7" rx="3.5" class="lime"/>
+      <text x="308" y="46" font-size="11" class="m">59% · 5d</text>
+      <text x="440" y="32" font-size="13" class="t">0</text>
+      <text x="508" y="32" font-size="13" class="t">0.22</text>
+    </g>
+
+    <g transform="translate(12 282)" opacity=".5">
+      <rect width="576" height="58" rx="8" fill="#171c25"/>
+      <text x="12" y="25" font-size="14" font-weight="600" class="t">client-lab</text>
+      <text x="12" y="44" font-size="11" class="m">ops@client-lab.example</text>
+      <text x="188" y="34" font-size="12" class="m">Excluded in this folder · Login needed</text>
+    </g>
+  </g>
+
+  <!-- explanations -->
+  <g transform="translate(664 32)">
+    <g>
+      <rect width="504" height="112" rx="12" fill="#141922" stroke="#2c3442"/>
+      <rect x="18" y="20" width="56" height="24" rx="6" fill="#c6ff3f"/>
+      <text x="46" y="36.5" font-size="12" font-weight="700" text-anchor="middle" class="mono" fill="#0d1017">cmd-n</text>
+      <text x="88" y="37" font-size="15" font-weight="700" class="t">picks the account for you</text>
+      <text x="18" y="70" font-size="12.5" class="m">Weekly quota left, weighted by how close the reset is,</text>
+      <text x="18" y="90" font-size="12.5" class="m">then the 5-hour window, minus the chats already running.</text>
+    </g>
+    <g transform="translate(0 132)">
+      <rect width="504" height="100" rx="12" fill="#141922" stroke="#2c3442"/>
+      <text x="18" y="36" font-size="15" font-weight="700" class="t">Keep accounts out of a folder</text>
+      <text x="18" y="62" font-size="12.5" class="m">Right-click an account in Limits: a client account never</text>
+      <text x="18" y="82" font-size="12.5" class="m">lands on your side projects, and the other way around.</text>
+    </g>
+    <g transform="translate(0 252)">
+      <rect width="504" height="124" rx="12" fill="#141922" stroke="#2c3442"/>
+      <text x="18" y="36" font-size="15" font-weight="700" class="t">Quotas always in view</text>
+      <text x="18" y="62" font-size="12.5" class="m">Status bar and Limits show what is left and when it resets,</text>
+      <text x="18" y="82" font-size="12.5" class="m">yellow under 20%, red under 10%. Logged-out accounts get</text>
+      <text x="18" y="102" font-size="12.5" class="m">a Log in button that opens a chat on them.</text>
+    </g>
+  </g>
+</svg>
