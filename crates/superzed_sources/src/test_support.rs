@@ -234,3 +234,15 @@ mod tests {
         assert_eq!(r.calls()[0].stdin.as_deref(), Some("in"));
     }
 }
+
+/// `gog` finto per l'account `j.doe@example.com`.
+pub fn gmail_runner() -> Arc<FakeRunner> {
+    let r = FakeRunner::new();
+    r.on("gog --version", ok(GOG_VERSION));
+    r.on("gmail search", ok(GOG_SEARCH));
+    r.on("gmail thread get t-200", ok(GOG_THREAD));
+    r.on("gmail get m-201", ok(GOG_MESSAGE_1));
+    r.on("gmail get m-202", ok(GOG_MESSAGE_2));
+    r.on("gmail drafts list", ok(GOG_DRAFTS));
+    r
+}

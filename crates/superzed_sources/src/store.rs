@@ -91,6 +91,11 @@ impl ConnectionStore {
         &self.tunnels
     }
 
+    /// Il runner dei comandi esterni (anche `gog` per il nodo Posta): nei test un `FakeRunner`.
+    pub fn runner(&self) -> Arc<dyn Runner> {
+        self.deps.runner.clone()
+    }
+
     /// Id delle voci non capite (conservate nel file): non si riusano.
     fn foreign_ids(&self) -> Vec<String> {
         self.foreign.iter().filter_map(|v| v.get("id")?.as_str().map(String::from)).collect()

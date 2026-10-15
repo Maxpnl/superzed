@@ -1,10 +1,11 @@
 //! Gmail in lettura e risposta via `gog` (openclaw/gogcli): argomenti, JSON e errori
 //! stanno solo qui, cosi' un cambio di formato di gog si corregge in un punto.
 //! L'autenticazione e' tutta di gog (`gog auth add`): superzed non tiene segreti Gmail.
-use crate::runner::{RunError, RunOutput};
+use crate::runner::{RunError, RunOutput, Runner};
 use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
 
 pub const GOG: &str = "gog";
 /// Variabile che fa rifiutare a gog ogni invio (bozze permesse): la ricevono le chat.
@@ -189,11 +190,84 @@ pub fn run_failure(error: RunError) -> String {
     }
 }
 
+pub const SEARCH_MAX: usize = 50;
+/// Messaggi di un thread riletti con gli a capo per il nodo: i piu' recenti.
+pub const READABLE_MESSAGES: usize = 10;
+
+#[derive(Clone)]
+pub struct GmailClient {
+    runner: Arc<dyn Runner>,
+    account: String,
+}
+
+impl GmailClient {
+    pub fn new(runner: Arc<dyn Runner>, account: impl Into<String>) -> Self {
+        Self { runner, account: account.into() }
+    }
+
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    fn args(&self, readonly: bool, command: &[&str]) -> Vec<String> {
+        let mut args = vec!["--account".to_string(), self.account.clone(), "--no-input".into(), "--json".into()];
+        if readonly {
+            args.push("--readonly".into());
+        }
+        args.extend(command.iter().map(|part| part.to_string()));
+        args
+    }
+
+    async fn run(&self, readonly: bool, command: &[&str], stdin: Option<String>) -> Result<String, String> {
+        let output = self.runner.run(GOG, &self.args(readonly, command), stdin).await.map_err(run_failure)?;
+        if output.success { Ok(output.stdout) } else { Err(gog_failure(&output, &self.account)) }
+    }
+
+    pub async fn check_version(&self) -> Result<(), String> {
+        let output = self.runner.run(GOG, &["--version".to_string()], None).await.map_err(run_failure)?;
+        let found = output.stdout.split_whitespace().next().unwrap_or_default().to_string();
+        match parse_version(&output.stdout) {
+            Some(version) if version >= MIN_GOG_VERSION => Ok(()),
+            _ => Err(gog_too_old(&found)),
+        }
+    }
+
+    pub async fn search(&self, query: &str, max: usize) -> Result<Vec<ThreadSummary>, String> {
+        let max = max.to_string();
+        // `--`: una query che comincia con `-` (es. `-in:spam`) sarebbe letta come un flag
+        parse_search(&self.run(true, &["gmail", "search", "--max", &max, "--", query], None).await?)
+    }
+
+    pub async fn thread(&self, id: &str, wrap_untrusted: bool) -> Result<MailThread, String> {
+        let mut command = vec!["gmail", "thread", "get", id, "--sanitize-content"];
+        if wrap_untrusted {
+            command.push("--wrap-untrusted");
+        }
+        parse_thread(&self.run(true, &command, None).await?)
+    }
+
+    /// `--sanitize-content` comprime gli a capo: per leggere nel nodo il corpo dei messaggi
+    /// recenti si rilegge con `gmail get`; se uno non si legge resta quello compresso.
+    pub async fn readable_thread(&self, id: &str) -> Result<MailThread, String> {
+        let mut thread = self.thread(id, false).await?;
+        let skip = thread.messages.len().saturating_sub(READABLE_MESSAGES);
+        for message in thread.messages.iter_mut().skip(skip) {
+            match self.run(true, &["gmail", "get", &message.id], None).await.and_then(|text| parse_message_body(&text)) {
+                Ok(body) => message.body = body,
+                Err(error) => log::info!("gmail: corpo di {} non riletto: {error}", message.id),
+            }
+        }
+        Ok(thread)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runner::{RunError, RunOutput};
-    use crate::test_support::{GOG_AUTH_ERROR, GOG_DRAFTS, GOG_MESSAGE_1, GOG_SEARCH, GOG_THREAD, GOG_VERSION};
+    use crate::test_support::{
+        FakeRunner, GOG_AUTH_ERROR, GOG_DRAFTS, GOG_MESSAGE_1, GOG_SEARCH, GOG_THREAD, GOG_VERSION, fail, gmail_runner, ok,
+    };
 
     #[test]
     fn project_query_is_always_parenthesized_and_empty_means_not_configured() {
@@ -262,5 +336,66 @@ mod tests {
         let plain = RunOutput { success: false, code: Some(1), stdout: String::new(), stderr: "boom\n".into() };
         assert_eq!(gog_failure(&plain, "a"), "gog: boom");
         assert_eq!(run_failure(RunError::NotFound("gog".into())), GOG_MISSING);
+    }
+
+    fn client(runner: &std::sync::Arc<FakeRunner>) -> GmailClient {
+        GmailClient::new(runner.clone(), "j.doe@example.com")
+    }
+
+    #[test]
+    fn search_is_readonly_and_the_query_follows_a_double_dash() {
+        let runner = gmail_runner();
+        let threads = futures::executor::block_on(client(&runner).search("(-in:spam from:@acme.example)", SEARCH_MAX)).unwrap();
+        assert_eq!(threads.len(), 2);
+        let call = runner.calls().into_iter().find(|c| c.line().contains("gmail search")).unwrap();
+        assert_eq!(call.program, "gog");
+        assert_eq!(
+            call.args,
+            ["--account", "j.doe@example.com", "--no-input", "--json", "--readonly", "gmail", "search", "--max", "50", "--", "(-in:spam from:@acme.example)"]
+        );
+    }
+
+    #[test]
+    fn thread_for_claude_is_sanitized_and_wrapped() {
+        let runner = gmail_runner();
+        futures::executor::block_on(client(&runner).thread("t-200", true)).unwrap();
+        let line = runner.calls().last().unwrap().line();
+        assert!(line.ends_with("gmail thread get t-200 --sanitize-content --wrap-untrusted"), "{line}");
+    }
+
+    #[test]
+    fn readable_thread_reloads_bodies_with_line_breaks() {
+        let runner = gmail_runner();
+        let thread = futures::executor::block_on(client(&runner).readable_thread("t-200")).unwrap();
+        assert_eq!(thread.messages[0].body, "Ciao,\nla policy è approvata.\n\nPotete procedere con l'annullamento.\n");
+        assert_eq!(thread.messages[1].body, "Dimenticavo:\nvale da lunedì.\n");
+        assert_eq!(runner.count("gmail get m-20"), 2);
+    }
+
+    #[test]
+    fn readable_thread_keeps_the_sanitized_body_when_a_message_cannot_be_read() {
+        let runner = gmail_runner();
+        runner.on("gmail get m-202", fail(5, "not found"));
+        let thread = futures::executor::block_on(client(&runner).readable_thread("t-200")).unwrap();
+        assert_eq!(thread.messages[1].body, "Dimenticavo: vale da lunedì.");
+    }
+
+    #[test]
+    fn version_check_reports_missing_and_old_gog() {
+        let runner = FakeRunner::new();
+        runner.on("gog --version", Err(RunError::NotFound("gog".into())));
+        assert_eq!(futures::executor::block_on(client(&runner).check_version()), Err(GOG_MISSING.to_string()));
+        runner.on("gog --version", ok("v0.43.9\n"));
+        assert_eq!(futures::executor::block_on(client(&runner).check_version()), Err(gog_too_old("v0.43.9")));
+        runner.on("gog --version", ok(GOG_VERSION));
+        assert_eq!(futures::executor::block_on(client(&runner).check_version()), Ok(()));
+    }
+
+    #[test]
+    fn auth_failure_names_the_account() {
+        let runner = gmail_runner();
+        runner.on("gmail search", Ok(RunOutput { success: false, code: Some(4), stdout: GOG_AUTH_ERROR.into(), stderr: String::new() }));
+        let err = futures::executor::block_on(client(&runner).search("(x)", 5)).unwrap_err();
+        assert_eq!(err, gog_not_authorized("j.doe@example.com"));
     }
 }
