@@ -90,7 +90,8 @@ impl SidebarStatus {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
+                    // superzed: nessuna sidebar registrata (niente sidebar AI): niente toggle
+                    show_toggle: enabled && mw.sidebar().is_some(),
                 }
             })
             .unwrap_or_default()
@@ -502,5 +503,26 @@ impl<T: StatusItemView> StatusItemViewHandle for Entity<T> {
 impl From<&dyn StatusItemViewHandle> for AnyView {
     fn from(val: &dyn StatusItemViewHandle) -> Self {
         val.to_any()
+    }
+}
+
+// superzed: senza sidebar registrata (superzed non ha la sidebar AI) il toggle non c'e'
+#[cfg(test)]
+mod superzed_tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use project::Project;
+
+    #[gpui::test]
+    async fn no_sidebar_toggle_without_a_sidebar(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let mw = window.root(cx).unwrap();
+        cx.update(|cx| {
+            assert!(mw.read(cx).sidebar().is_none());
+            assert!(!SidebarStatus::query(&Some(mw.downgrade()), cx).show_toggle);
+        });
     }
 }

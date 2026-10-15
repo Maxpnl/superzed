@@ -155,7 +155,9 @@ impl TitleBar {
 
         h_flex()
             .id("collaborator-list")
-            .w_full()
+            // superzed: solo lo spazio che avanza, cosi' le tab di progetto non si stringono
+            .flex_1()
+            .min_w_0()
             .gap_1()
             .overflow_x_scroll()
             .when_some(

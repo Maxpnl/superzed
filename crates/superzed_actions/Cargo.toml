@@ -1,0 +1,20 @@
+[package]
+name = "superzed_actions"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/superzed_actions.rs"
+
+[dependencies]
+gpui.workspace = true
+schemars.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

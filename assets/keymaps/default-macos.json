@@ -26,7 +26,10 @@
       "ctrl-c": "menu::Cancel",
       "escape": "menu::Cancel",
       "alt-shift-enter": "menu::Restart",
-      "cmd-shift-w": "workspace::CloseWindow",
+      // superzed: cmd-shift-w chiude la tab di progetto (qui, senza contesto, per
+      // vincere anche sotto Pane/Canvas/Terminal); la finestra si chiude con cmd-alt-shift-w
+      "cmd-shift-w": "superzed::CloseProjectTab",
+      "cmd-alt-shift-w": "workspace::CloseWindow",
       "shift-escape": "workspace::ToggleZoom",
       "cmd-o": "workspace::Open",
       "cmd-=": ["zed::IncreaseBufferFontSize", { "persist": false }],
@@ -1757,6 +1760,241 @@
       "cmd-enter": "skill_creator::SaveSkill",
       "tab": "skill_creator::FocusNextField",
       "shift-tab": "skill_creator::FocusPreviousField",
+    },
+  },
+  // superzed: azioni della shell (crates/superzed_actions); valgono ovunque nel workspace
+  {
+    "context": "Workspace",
+    "bindings": {
+      "cmd-t": "superzed::NewTerminal",
+      "cmd-n": "superzed::NewClaudeNode",
+      // superzed: picker degli account claude (sostituisce workspace::NewWindow)
+      "cmd-shift-n": "superzed::NewClaudeNodePick",
+      // superzed: picker dei prompt prefabbricati (sostituisce diagnostics::Deploy)
+      "cmd-shift-m": "superzed::NewClaudeNodeFromPrompt",
+      "cmd-alt-n": "superzed::NewNote",
+      "cmd-j": "superzed::FocusCanvas",
+      "cmd-e": "superzed::FocusEditor",
+      "ctrl-tab": "superzed::NextProjectTab",
+      "ctrl-shift-tab": "superzed::PrevProjectTab",
+      "cmd-shift-w": "superzed::CloseProjectTab",
+      "shift-f2": "superzed::RenameProjectTab",
+      "alt-shift-c": "superzed::CycleProjectTabColor",
+      "ctrl-1": ["superzed::ActivateProjectTab", 1],
+      "ctrl-2": ["superzed::ActivateProjectTab", 2],
+      "ctrl-3": ["superzed::ActivateProjectTab", 3],
+      "ctrl-4": ["superzed::ActivateProjectTab", 4],
+      "ctrl-5": ["superzed::ActivateProjectTab", 5],
+      "ctrl-6": ["superzed::ActivateProjectTab", 6],
+      "ctrl-7": ["superzed::ActivateProjectTab", 7],
+      "ctrl-8": ["superzed::ActivateProjectTab", 8],
+      "ctrl-9": ["superzed::ActivateProjectTab", 9],
+      "cmd-1": ["superzed::SidebarView", 1],
+      "cmd-2": ["superzed::SidebarView", 2],
+      "cmd-3": ["superzed::SidebarView", 3],
+      "cmd-4": ["superzed::SidebarView", 4],
+      "cmd-5": ["superzed::SidebarView", 5],
+      "cmd-6": ["superzed::SidebarView", 6],
+      "cmd-alt-k": "superzed::OpenKanban",
+    },
+  },
+  // superzed: ctrl-1…9 vincono su pane::ActivateItem (contesto Pane, piu' profondo di Workspace)
+  {
+    "context": "Pane",
+    "bindings": {
+      "ctrl-1": ["superzed::ActivateProjectTab", 1],
+      "ctrl-2": ["superzed::ActivateProjectTab", 2],
+      "ctrl-3": ["superzed::ActivateProjectTab", 3],
+      "ctrl-4": ["superzed::ActivateProjectTab", 4],
+      "ctrl-5": ["superzed::ActivateProjectTab", 5],
+      "ctrl-6": ["superzed::ActivateProjectTab", 6],
+      "ctrl-7": ["superzed::ActivateProjectTab", 7],
+      "ctrl-8": ["superzed::ActivateProjectTab", 8],
+      "ctrl-9": ["superzed::ActivateProjectTab", 9],
+    },
+  },
+  // superzed: cmd-1/cmd-2 vincono sulle tab interne del pannello git
+  {
+    "context": "GitPanel",
+    "bindings": {
+      "cmd-1": ["superzed::SidebarView", 1],
+      "cmd-2": ["superzed::SidebarView", 2],
+    },
+  },
+  // superzed: form delle automazioni — cmd-invio salva da ogni campo; nel prompt (piu'
+  // righe) invio va a capo e tab passa al campo dopo invece di inserire una tabulazione
+  {
+    "context": "SuperzedAutomationForm > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "menu::Confirm",
+    },
+  },
+  {
+    "context": "SuperzedAutomationForm > Editor && mode == auto_height",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "editor::Newline",
+      "tab": "menu::SelectNext",
+      "shift-tab": "menu::SelectPrevious",
+    },
+  },
+  // superzed: form delle connessioni (vista Fonti) — tab passa al campo dopo, cmd-invio salva
+  {
+    "context": "SuperzedConnectionForm > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "menu::SelectNext",
+      "shift-tab": "menu::SelectPrevious",
+      "cmd-enter": "menu::Confirm",
+    },
+  },
+  // superzed: anteprima Fatto → GitHub — nel corpo delle issue invio va a capo; scrive solo il pulsante
+  {
+    "context": "SuperzedDoneReview > Editor && mode == auto_height",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "editor::Newline",
+    },
+  },
+  // superzed: canvas (anche con il focus dentro un nodo)
+  {
+    "context": "Canvas",
+    "bindings": {
+      "cmd-=": "superzed::CanvasZoomIn",
+      "cmd-+": "superzed::CanvasZoomIn",
+      "cmd--": "superzed::CanvasZoomOut",
+      "cmd-0": "superzed::CanvasZoomReset",
+      "cmd-alt-f": "superzed::ZoomToFocusedNode",
+      "cmd-w": "superzed::CloseNode",
+      // superzed: golden per il nodo con il focus (nelle note l'Editor non lega cmd-g,
+      // quindi vale anche li'; nell'editor dei file resta search::SelectNextMatch)
+      "cmd-g": "superzed::ToggleGolden",
+      // superzed: navigazione tra le chat (kanban, Automazioni, nodi liberi); nelle note
+      // (Editor, piu' profondo) cmd+frecce restano quelle dell'editor
+      "cmd-up": "superzed::FocusChatUp",
+      "cmd-down": "superzed::FocusChatDown",
+      "cmd-left": "superzed::FocusChatLeft",
+      "cmd-right": "superzed::FocusChatRight",
+      // superzed: cmd-alt-destra/sinistra (non su/giu': vincono su
+      // pane::ActivateNextItem/ActivatePreviousItem legati in "Pane", ma il canvas non e'
+      // annidato li' quindi non c'e' collisione da risolvere)
+      "cmd-alt-right": "superzed::FocusNextArea",
+      "cmd-alt-left": "superzed::FocusPreviousArea",
+    },
+  },
+  // superzed: kanban (2b)
+  {
+    "context": "Kanban",
+    "bindings": {
+      "cmd-shift-right": "superzed::MoveCardNext",
+      "cmd-shift-left": "superzed::MoveCardPrev",
+      // lo zoom e' del canvas anche con il focus sul kanban (senza, vincerebbe lo
+      // zoom del font di Zed, legato senza contesto)
+      "cmd-=": "superzed::CanvasZoomIn",
+      "cmd-+": "superzed::CanvasZoomIn",
+      "cmd--": "superzed::CanvasZoomOut",
+      "cmd-0": "superzed::CanvasZoomReset",
+    },
+  },
+  // superzed: navigazione tra le chat con il focus sul kanban, sulle Automazioni o su un
+  // pannello fonte: cmd-up/down vincono su menu::SelectFirst/SelectLast (legati senza
+  // contesto, che altrimenti arrivano prima del contesto `Canvas`)
+  {
+    "context": "Kanban || Automations || SuperzedSourcePanel",
+    "bindings": {
+      "cmd-up": "superzed::FocusChatUp",
+      "cmd-down": "superzed::FocusChatDown",
+    },
+  },
+  // superzed: cmd-alt-destra/sinistra cambiano area anche col focus in uno dei
+  // pannelli della sidebar (Sessioni, Fonti, Notifiche, Ricerca): un gestore lato
+  // workspace (`superzed_canvas::init`) inoltra al canvas del progetto attivo. Le
+  // cmd-frecce restano quelle di sempre in questi pannelli (nessun binding nuovo).
+  {
+    "context": "SuperzedSessions || SuperzedSources || SuperzedNotifications || SuperzedSearch",
+    "bindings": {
+      "cmd-alt-right": "superzed::FocusNextArea",
+      "cmd-alt-left": "superzed::FocusPreviousArea",
+    },
+  },
+  // superzed: kanban (2b) — spostare la chat con il focus nel suo terminale
+  {
+    "context": "KanbanChat",
+    "bindings": {
+      "cmd-shift-right": "superzed::MoveCardNext",
+      "cmd-shift-left": "superzed::MoveCardPrev"
+    }
+  },
+  // superzed: modifica dei nodi, solo con il focus sul canvas stesso
+  {
+    "context": "CanvasFocused",
+    "bindings": {
+      "backspace": "superzed::CloseNode",
+      "delete": "superzed::CloseNode",
+      "cmd-a": "superzed::SelectAllNodes",
+      "escape": "superzed::DeselectNodes",
+      "enter": "superzed::FocusSelectedNode",
+      "f2": "superzed::RenameNode",
+      "alt-c": "superzed::CycleNodeColor",
+      "left": ["superzed::MoveSelectedNodes", { "dx": -10, "dy": 0 }],
+      "right": ["superzed::MoveSelectedNodes", { "dx": 10, "dy": 0 }],
+      "up": ["superzed::MoveSelectedNodes", { "dx": 0, "dy": -10 }],
+      "down": ["superzed::MoveSelectedNodes", { "dx": 0, "dy": 10 }],
+      "shift-left": ["superzed::MoveSelectedNodes", { "dx": -50, "dy": 0 }],
+      "shift-right": ["superzed::MoveSelectedNodes", { "dx": 50, "dy": 0 }],
+      "shift-up": ["superzed::MoveSelectedNodes", { "dx": 0, "dy": -50 }],
+      "shift-down": ["superzed::MoveSelectedNodes", { "dx": 0, "dy": 50 }],
+    },
+  },
+  // superzed: con il focus in un terminale del canvas vincono le azioni superzed
+  {
+    "context": "Canvas > Terminal",
+    "bindings": {
+      "cmd-t": "superzed::NewTerminal",
+      "cmd-n": "superzed::NewClaudeNode",
+      // superzed: picker degli account claude (sostituisce workspace::NewWindow)
+      "cmd-shift-n": "superzed::NewClaudeNodePick",
+      // superzed: picker dei prompt prefabbricati (sostituisce diagnostics::Deploy)
+      "cmd-shift-m": "superzed::NewClaudeNodeFromPrompt",
+      "cmd-j": "superzed::FocusCanvas",
+      "cmd-e": "superzed::FocusEditor",
+      "cmd-w": "superzed::CloseNode",
+      "cmd-=": "superzed::CanvasZoomIn",
+      "cmd-+": "superzed::CanvasZoomIn",
+      "cmd--": "superzed::CanvasZoomOut",
+      "cmd-0": "superzed::CanvasZoomReset",
+      "cmd-alt-f": "superzed::ZoomToFocusedNode",
+      // superzed: navigazione tra le chat; coprono quelle del terminale (cmd-left/right
+      // inizio/fine riga, cmd-up/down pagina su/giu')
+      "cmd-up": "superzed::FocusChatUp",
+      "cmd-down": "superzed::FocusChatDown",
+      "cmd-left": "superzed::FocusChatLeft",
+      "cmd-right": "superzed::FocusChatRight",
+      "cmd-alt-right": "superzed::FocusNextArea",
+      "cmd-alt-left": "superzed::FocusPreviousArea",
+      "ctrl-tab": "superzed::NextProjectTab",
+      "ctrl-shift-tab": "superzed::PrevProjectTab",
+      "cmd-1": ["superzed::SidebarView", 1],
+      "cmd-2": ["superzed::SidebarView", 2],
+      "cmd-3": ["superzed::SidebarView", 3],
+      "cmd-4": ["superzed::SidebarView", 4],
+      "cmd-5": ["superzed::SidebarView", 5],
+      "cmd-6": ["superzed::SidebarView", 6],
+    },
+  },
+  // superzed: in una nota lo zoom e' quello del canvas (tutto globale, niente zoom del
+  // solo nodo)
+  {
+    "context": "Canvas > Editor",
+    "bindings": {
+      // superzed: cmd-e in una nota va all'editor, non a buffer_search
+      "cmd-e": "superzed::FocusEditor",
+      "cmd-=": "superzed::CanvasZoomIn",
+      "cmd-+": "superzed::CanvasZoomIn",
+      "cmd--": "superzed::CanvasZoomOut",
+      "cmd-0": "superzed::CanvasZoomReset",
+      "cmd-alt-f": "superzed::ZoomToFocusedNode",
     },
   },
 ]

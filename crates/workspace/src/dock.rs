@@ -1,3 +1,7 @@
+// superzed: striscia delle viste della sidebar (modulo figlio: legge i campi del Dock)
+#[path = "superzed_sidebar_strip.rs"]
+mod superzed_sidebar_strip;
+
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
 use crate::status_bar::HideStatusItem;
@@ -1268,10 +1272,15 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    // superzed: serve `window` per la striscia di icone (era `_window`)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
+            // superzed: calcolata prima di `create_resize_handle` (che tiene un prestito
+            // condiviso di `cx` fino alla sua chiamata piu' sotto): qui serve `&mut cx`.
+            let superzed_strip = (position == DockPosition::Left)
+                .then(|| self.superzed_render_strip(window, cx));
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
@@ -1356,6 +1365,10 @@ impl Render for Dock {
                         .map(|this| match self.position().axis() {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
+                        })
+                        // superzed: nel dock sinistro la striscia delle viste sta sopra il pannello
+                        .when_some(superzed_strip, |this, strip| {
+                            this.flex().flex_col().child(strip)
                         })
                         .child(
                             entry

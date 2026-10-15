@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Runs a cargo command on GitHub Actions instead of this machine (no local builds).
+#
+#   script/remote-test "cargo test -p superzed_canvas prompt_"
+#   script/remote-test "./script/clippy -p superzed_canvas"
+#
+# It snapshots the working tree (tracked and untracked, .gitignore respected) into a temporary
+# commit without touching the index or the current branch, pushes it as remote-test/<sha> with
+# the command in .remote-test-command, follows the `superzed ci` run, prints the end of its log
+# and exits with the run's result. The temporary branch is deleted at the end.
+
+set -euo pipefail
+
+if [ $# -ne 1 ]; then
+    echo "usage: script/remote-test \"<cargo command>\"" >&2
+    exit 2
+fi
+command=$1
+case "$command" in
+    "cargo "*|"./script/clippy"*) ;;
+    *) echo "only cargo or ./script/clippy commands are allowed" >&2; exit 2 ;;
+esac
+
+remote=${SUPERZED_REMOTE:-origin}
+repo=${SUPERZED_REPO:-Maxpnl/superzed}
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+# a private index, so the user's staging area stays as it is
+index_file=$(mktemp)
+trap 'rm -f "$index_file"' EXIT
+export GIT_INDEX_FILE=$index_file
+git read-tree HEAD
+git add -A
+command_blob=$(printf '%s\n' "$command" | git hash-object -w --stdin)
+git update-index --add --cacheinfo 100644,"$command_blob",.remote-test-command
+tree=$(git write-tree)
+unset GIT_INDEX_FILE
+commit=$(git commit-tree "$tree" -p HEAD -m "remote-test: $command")
+branch="remote-test/${commit:0:12}"
+
+git push --quiet "$remote" "$commit:refs/heads/$branch"
+cleanup() {
+    git push --quiet "$remote" --delete "$branch" >/dev/null 2>&1 || true
+    rm -f "$index_file"
+}
+trap cleanup EXIT
+
+echo "pushed $branch, waiting for the run..."
+run_id=""
+for _ in $(seq 1 60); do
+    # filtered by name in jq: `gh run list -w` only knows workflows on the default branch
+    run_id=$(gh run list -R "$repo" -b "$branch" -L 5 --json databaseId,workflowName \
+        --jq '[.[] | select(.workflowName == "superzed ci")][0].databaseId // empty' 2>/dev/null || true)
+    [ -n "$run_id" ] && break
+    sleep 5
+done
+if [ -z "$run_id" ]; then
+    echo "no run started for $branch" >&2
+    exit 1
+fi
+echo "run: https://github.com/$repo/actions/runs/$run_id"
+
+gh run watch "$run_id" -R "$repo" --exit-status --interval 15 >/dev/null 2>&1 && status=0 || status=$?
+# only the command's own step: the job's tail is checkout cleanup
+gh run view "$run_id" -R "$repo" --log 2>/dev/null | awk -F'\t' '$2 == "Remote test command"' | cut -f3- \
+    | tail -n "${REMOTE_TEST_LOG_LINES:-80}"
+conclusion=$(gh run view "$run_id" -R "$repo" --json conclusion --jq .conclusion)
+echo "conclusion: $conclusion"
+[ "$conclusion" = "success" ] || exit "$(( status == 0 ? 1 : status ))"

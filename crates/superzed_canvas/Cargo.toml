@@ -1,0 +1,67 @@
+[package]
+name = "superzed_canvas"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/superzed_canvas.rs"
+
+[dependencies]
+anyhow.workspace = true
+collections.workspace = true
+editor.workspace = true
+fs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+libc.workspace = true
+log.workspace = true
+# superzed: menu::Confirm / menu::Cancel per il prompt di testo
+menu.workspace = true
+paths.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# superzed: NoteNode reads the buffer font size via ThemeSettings::get_global
+settings.workspace = true
+superzed_actions.workspace = true
+# superzed: sessioni claude dei nodi (2a)
+superzed_sessions.workspace = true
+# archivio delle notifiche (canale notify)
+superzed_notifications.workspace = true
+# fonti esterne (sottoprogetto 5A)
+superzed_sources.workspace = true
+# account claude e scheduler (sottoprogetto 3)
+superzed_accounts.workspace = true
+# pipeline Fatto → GitHub (sottoprogetto 4)
+superzed_done.workspace = true
+chrono.workspace = true
+task.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
+# colori delle gravita' (StatusColors)
+theme.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+util.workspace = true
+uuid.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+editor = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+superzed_accounts = { workspace = true, features = ["test-support"] }
+superzed_done = { workspace = true, features = ["test-support"] }
+superzed_ipc.workspace = true
+superzed_sources = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+terminal = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }

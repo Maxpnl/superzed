@@ -15,6 +15,9 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_millis(35);
 const SEND_TIMEOUT: Duration = Duration::from_millis(20);
 const USER_BLOCK: u16 = 100;
 
+// superzed: base diversa da quella di Zed (43737), cosi' le istanze non si parlano
+const SUPERZED_INSTANCE_BASE_PORT: u16 = 47737;
+
 fn address() -> SocketAddr {
     // These port numbers are offset by the user ID to avoid conflicts between
     // different users on the same machine. In addition to that the ports for each
@@ -28,11 +31,12 @@ fn address() -> SocketAddr {
     // 44338, 44438, and 44538 for the preview, stable, and nightly channels,
     // respectively. User 502 will use ports 44339, 44439, and 44539 for the preview,
     // stable, and nightly channels, respectively.
+    // superzed: base di porta distinta da Zed
     let port = match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => 43737,
-        ReleaseChannel::Preview => 43737 + USER_BLOCK,
-        ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
-        ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
+        ReleaseChannel::Dev => SUPERZED_INSTANCE_BASE_PORT,
+        ReleaseChannel::Preview => SUPERZED_INSTANCE_BASE_PORT + USER_BLOCK,
+        ReleaseChannel::Stable => SUPERZED_INSTANCE_BASE_PORT + (2 * USER_BLOCK),
+        ReleaseChannel::Nightly => SUPERZED_INSTANCE_BASE_PORT + (3 * USER_BLOCK),
     };
     let mut user_port = port;
     let mut sys = System::new_all();
@@ -70,12 +74,13 @@ fn get_uid_as_u32(uid: &sysinfo::Uid) -> u32 {
         .unwrap_or(0)
 }
 
+// superzed: nome dell'app nell'handshake, cosi' non collide con quello di Zed
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "superzed Dev Instance Running",
+        ReleaseChannel::Nightly => "superzed Nightly Instance Running",
+        ReleaseChannel::Preview => "superzed Preview Instance Running",
+        ReleaseChannel::Stable => "superzed Stable Instance Running",
     }
 }
 
@@ -147,5 +152,16 @@ fn check_got_handshake() -> bool {
         }
 
         Err(_) => false,
+    }
+}
+
+// superzed: porta e handshake distinti, cosi' superzed e Zed stable convivono
+#[cfg(test)]
+mod superzed_tests {
+    #[test]
+    fn instance_does_not_collide_with_zed() {
+        assert_ne!(super::SUPERZED_INSTANCE_BASE_PORT, 43737);
+        assert!(super::address().port() >= super::SUPERZED_INSTANCE_BASE_PORT);
+        assert!(super::instance_handshake().starts_with("superzed"));
     }
 }

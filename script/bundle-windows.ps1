@@ -41,7 +41,10 @@ function Get-VSArch {
 }
 
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+# superzed: Visual Studio trovato con vswhere (sui runner GitHub e' Enterprise, non Community)
+$vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+if (-not $vsPath) { $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Community" }
+& "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
@@ -120,6 +123,11 @@ function BuildZedAndItsFriends {
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    # superzed: niente pacchetto appx del menu contestuale di Windows 11 (identita' di
+    # Zed Industries, e senza firma non si installa): resta il menu classico del registro
+    if ($superzed) {
+        return
+    }
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -195,6 +203,9 @@ function UploadToSentry {
 }
 
 function MakeAppx {
+    if ($superzed) {
+        return
+    }
     switch ($channel) {
         "stable" {
             $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest.xml"
@@ -218,7 +229,10 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe"
+    if (-not $superzed) {
+        $files += ",$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    }
     & "$innoDir\sign.ps1" $files
 }
 
@@ -240,10 +254,13 @@ function DownloadConpty {
 }
 
 function CollectFiles {
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    if (-not $superzed) {
+        Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
+        Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
+    }
+    # superzed: la CLI si chiama superzed, per non coprire `zed` nel PATH
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\superzed.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\superzed" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -264,18 +281,19 @@ function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
     switch ($channel) {
         "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
+            # superzed: identita' propria, installabile accanto a Zed
+            $appId = "{{F4814CF9-94A9-4ADE-B10F-0516303006DA}"
             $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
+            $appName = "superzed"
+            $appDisplayName = "superzed"
+            $appSetupName = "superzed-$Architecture"
+            # The mutex name here should match `app_identifier()` in crates\release_channel (used by windows_only_instance.rs)
+            $appMutex = "superzed-Stable-Instance-Mutex"
             $appExeName = "Zed"
-            $regValueName = "Zed"
-            $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
-            $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
+            $regValueName = "superzed"
+            $appUserId = "dev.superzed.superzed"
+            $appShellNameShort = "super&zed"
+            $appAppxFullName = ""
         }
         "preview" {
             $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
@@ -377,6 +395,8 @@ function BuildInstaller {
 }
 
 ParseZedWorkspace
+# superzed: il canale stable e' la build di superzed
+$superzed = ($channel -eq "stable")
 $innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
 $debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
 $debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"

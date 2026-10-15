@@ -1013,6 +1013,16 @@ impl TerminalBuilder {
         let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
 
         let terminal = Terminal {
+            // superzed:
+            superzed_grid_only_resize: false,
+            // superzed:
+            superzed_pty_resizes: 0,
+            // superzed:
+            superzed_pending_pty_resize: None,
+            // superzed:
+            superzed_pty_resize_task: None,
+            // superzed:
+            superzed_last_pty_bounds: None,
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
@@ -1300,6 +1310,16 @@ impl TerminalBuilder {
 
             let no_task = task.is_none();
             let terminal = Terminal {
+                // superzed:
+                superzed_grid_only_resize: false,
+                // superzed:
+                superzed_pty_resizes: 0,
+                // superzed:
+                superzed_pending_pty_resize: None,
+                // superzed:
+                superzed_pty_resize_task: None,
+                // superzed:
+                superzed_last_pty_bounds: None,
                 task,
                 terminal_type,
                 subprocess,
@@ -1548,6 +1568,16 @@ pub struct Terminal {
     suppress_hyperlink_throttle_once: bool,
     #[cfg(any(test, feature = "test-support"))]
     pty_write_log: std::cell::RefCell<Vec<Vec<u8>>>,
+    // superzed: nodi del canvas: il PTY si ridimensiona solo se cambiano righe o colonne
+    superzed_grid_only_resize: bool,
+    // superzed: contatore dei resize del PTY (test)
+    superzed_pty_resizes: usize,
+    // superzed: resize del PTY in attesa (nodi del canvas): parte dopo 150 ms di griglia stabile
+    superzed_pending_pty_resize: Option<TerminalBounds>,
+    // superzed:
+    superzed_pty_resize_task: Option<Task<()>>,
+    // superzed: bounds dell'ultimo resize del PTY (test)
+    superzed_last_pty_bounds: Option<TerminalBounds>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1603,6 +1633,9 @@ impl TaskStatus {
         };
     }
 }
+
+// superzed: attesa di griglia stabile prima del SIGWINCH nei nodi del canvas
+pub const SUPERZED_PTY_RESIZE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 const FIND_HYPERLINK_THROTTLE: Duration = Duration::from_millis(100);
@@ -1719,12 +1752,13 @@ impl Terminal {
                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
 
-                if let TerminalType::Pty {
-                    resources: PtyResources::Active(pty_tx),
-                    ..
-                } = &self.terminal_type
-                {
-                    pty_tx.resize(new_bounds);
+                // superzed: nei nodi del canvas il SIGWINCH parte solo a griglia stabile
+                // (150 ms, vince l'ultimo valore), tranne il primo (dai bounds di default al
+                // primo layout), che parte subito; altrove sempre subito, come upstream
+                if self.superzed_grid_only_resize && self.superzed_last_pty_bounds.is_some() {
+                    self.superzed_schedule_pty_resize(new_bounds, cx);
+                } else {
+                    self.superzed_pty_resize_now(new_bounds);
                 }
 
                 resize(term, new_bounds);
@@ -2081,6 +2115,57 @@ impl Terminal {
         self.last_content.scrolled_to_bottom
     }
 
+    // superzed: nodi del canvas: il PTY si ridimensiona solo se cambiano righe o colonne
+    pub fn superzed_set_grid_only_resize(&mut self, on: bool) {
+        self.superzed_grid_only_resize = on;
+    }
+
+    // superzed:
+    pub fn superzed_grid_only_resize(&self) -> bool {
+        self.superzed_grid_only_resize
+    }
+
+    // superzed: quante volte il PTY e' stato ridimensionato (test)
+    pub fn superzed_pty_resize_count(&self) -> usize {
+        self.superzed_pty_resizes
+    }
+
+    // superzed: ridimensiona subito il PTY (se attivo) e conta il resize
+    fn superzed_pty_resize_now(&mut self, bounds: TerminalBounds) {
+        if let TerminalType::Pty {
+            resources: PtyResources::Active(pty_tx),
+            ..
+        } = &self.terminal_type
+        {
+            pty_tx.resize(bounds);
+            self.superzed_pty_resizes += 1;
+            self.superzed_last_pty_bounds = Some(bounds);
+        }
+    }
+
+    // superzed: bounds dell'ultimo resize effettivo del PTY (test)
+    pub fn superzed_last_pty_bounds(&self) -> Option<TerminalBounds> {
+        self.superzed_last_pty_bounds
+    }
+
+    // superzed: rinvia il resize del PTY finche' la griglia non resta ferma per
+    // SUPERZED_PTY_RESIZE_DEBOUNCE; un nuovo valore sostituisce il precedente e riavvia l'attesa
+    fn superzed_schedule_pty_resize(&mut self, bounds: TerminalBounds, cx: &mut Context<Self>) {
+        self.superzed_pending_pty_resize = Some(bounds);
+        self.superzed_pty_resize_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SUPERZED_PTY_RESIZE_DEBOUNCE)
+                .await;
+            this.update(cx, |this, _| {
+                this.superzed_pty_resize_task = None;
+                if let Some(bounds) = this.superzed_pending_pty_resize.take() {
+                    this.superzed_pty_resize_now(bounds);
+                }
+            })
+            .ok();
+        }));
+    }
+
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
@@ -2090,18 +2175,19 @@ impl Terminal {
 
         // Avoid spamming PTY resizes on pixel-level size changes (e.g. while dragging edges),
         // since those can generate excessive SIGWINCH/reflows and cause visible flicker.
-        let requires_resize = old_bounds.num_lines() != new_bounds.num_lines()
-            || old_bounds.num_columns() != new_bounds.num_columns()
-            || old_bounds.cell_width != new_bounds.cell_width
+        // superzed: con lo zoom del canvas cambia solo la cella: niente SIGWINCH a ogni passo
+        let grid_changed = old_bounds.num_lines() != new_bounds.num_lines()
+            || old_bounds.num_columns() != new_bounds.num_columns();
+        let cell_changed = old_bounds.cell_width != new_bounds.cell_width
             || old_bounds.line_height != new_bounds.line_height;
+        let requires_resize = grid_changed || (cell_changed && !self.superzed_grid_only_resize);
 
-        if !requires_resize {
-            return;
-        }
-
+        // superzed: un Resize gia' in coda prende sempre i bounds piu' recenti (niente
+        // cella vecchia per un frame), anche se questo passo da solo non lo richiederebbe
         match self.events.back_mut() {
             Some(InternalEvent::Resize(pending_bounds)) => *pending_bounds = new_bounds,
-            _ => self.events.push_back(InternalEvent::Resize(new_bounds)),
+            _ if requires_resize => self.events.push_back(InternalEvent::Resize(new_bounds)),
+            _ => {}
         }
     }
 
@@ -4481,6 +4567,52 @@ mod tests {
             terminal.events.back(),
             Some(InternalEvent::Resize(_))
         ));
+    }
+
+    // superzed: nei nodi del canvas la sola variazione della cella (zoom) non ridimensiona il PTY
+    #[gpui::test]
+    async fn superzed_grid_only_resize_ignores_cell_size_changes(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let mut terminal = builder.terminal;
+        let base = TerminalBounds {
+            cell_width: Pixels::from(10.),
+            line_height: Pixels::from(10.),
+            bounds: bounds(GpuiPoint::default(), size(Pixels::from(100.), Pixels::from(100.))),
+        };
+        let mut zoomed = base;
+        zoomed.cell_width = Pixels::from(10.5);
+        zoomed.line_height = Pixels::from(10.4);
+        zoomed.bounds.size = size(Pixels::from(106.), Pixels::from(105.)); // sempre 10×10
+        terminal.set_size(base);
+        terminal.events.clear();
+        terminal.set_size(zoomed);
+        assert!(matches!(terminal.events.back(), Some(InternalEvent::Resize(_))), "upstream invariato");
+        terminal.set_size(base);
+        terminal.events.clear();
+        assert!(!terminal.superzed_grid_only_resize());
+        terminal.superzed_set_grid_only_resize(true);
+        terminal.set_size(zoomed);
+        assert!(terminal.events.is_empty(), "stessa griglia: nessun Resize");
+        assert_eq!(terminal.last_content.terminal_bounds, zoomed, "i bounds per il disegno si aggiornano");
+        let mut taller = zoomed;
+        taller.bounds.size.height = Pixels::from(116.); // 11 righe
+        terminal.set_size(taller);
+        assert!(matches!(terminal.events.back(), Some(InternalEvent::Resize(_))), "riga in piu': Resize");
+        // un Resize gia' in coda prende i bounds piu' recenti anche per un cambio di sola cella
+        let mut finer = taller;
+        finer.cell_width = Pixels::from(10.4);
+        terminal.set_size(finer);
+        assert!(matches!(terminal.events.back(), Some(InternalEvent::Resize(b)) if *b == finer));
+        assert_eq!(terminal.events.len(), 1);
     }
 
     fn get_cells(size: TerminalBounds, rng: &mut StdRng) -> Vec<Vec<char>> {

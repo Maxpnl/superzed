@@ -6,8 +6,7 @@ use gpui::{
     MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
     WindowButtonLayout, WindowControlArea, div, px,
 };
-use project::DisableAiSettings;
-use settings::Settings;
+// superzed: import di DisableAiSettings/Settings tolti (is_multi_workspace_enabled e' sempre true)
 use smallvec::SmallVec;
 use std::mem;
 use ui::{
@@ -109,8 +108,9 @@ impl PlatformTitleBar {
             .unwrap_or_default()
     }
 
-    pub fn is_multi_workspace_enabled(cx: &App) -> bool {
-        !DisableAiSettings::get_global(cx).disable_ai
+    // superzed: vedi MultiWorkspace::multi_workspace_enabled
+    pub fn is_multi_workspace_enabled(_cx: &App) -> bool {
+        true
     }
 }
 

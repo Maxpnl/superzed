@@ -61,3 +61,6 @@ crates/docs_preprocessor/actions.json
 
 .local*
 .cache
+
+# superzed: canvas layout of this checkout (account and session ids), personal
+.superzed/project.json

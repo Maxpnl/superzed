@@ -199,6 +199,20 @@ sidebar.workspace = true
 smol.workspace = true
 snippet_provider.workspace = true
 snippets_ui.workspace = true
+# superzed: crate della shell
+superzed_actions.workspace = true
+superzed_canvas.workspace = true
+# superzed: notifiche (sottoprogetto 6)
+superzed_notifications.workspace = true
+# superzed: account claude (sottoprogetto 3)
+superzed_accounts.workspace = true
+# superzed: fonti esterne (sottoprogetto 5A)
+superzed_sources.workspace = true
+# superzed: pipeline Fatto → GitHub (sottoprogetto 4)
+superzed_done.workspace = true
+# superzed: sessioni claude (2a)
+superzed_sessions.workspace = true
+superzed_sidebar.workspace = true
 svg_preview.workspace = true
 sysinfo.workspace = true
 tab_switcher.workspace = true
@@ -304,11 +318,13 @@ osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+# superzed: bundle distinto da Zed (identificatore, nome, schema URL)
+identifier = "dev.superzed.superzed"
+name = "superzed"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+# superzed: bundle distinto da Zed (schema URL)
+osx_url_schemes = ["superzed"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

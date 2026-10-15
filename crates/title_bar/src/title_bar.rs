@@ -243,7 +243,16 @@ impl Render for TitleBar {
 
         let show_menus = show_menus(cx);
 
-        let mut children = <ArrayVec<_, 5>>::new();
+        // superzed: 6 = tab di progetto + fino a 5 figli di upstream
+        let mut children = <ArrayVec<_, 6>>::new();
+
+        // superzed: le tab di progetto sono il primo gruppo del title bar
+        let superzed_tabs = self.multi_workspace.as_ref().and_then(|mw| mw.upgrade());
+        // superzed: con le tab il nome del progetto c'e' gia', il selettore di upstream no
+        let superzed_has_tabs = superzed_tabs.is_some();
+        if let Some(mw) = superzed_tabs {
+            children.push(workspace::superzed_tabs::render_project_tabs(&mw, window, cx));
+        }
 
         let mut project_name = None;
         let mut repository = None;
@@ -333,7 +342,10 @@ impl Render for TitleBar {
                                 .when(title_bar_settings.show_project_items, |title_bar| {
                                     title_bar
                                         .children(self.render_project_host(cx))
-                                        .child(self.render_project_name(project_name, window, cx))
+                                        // superzed: il nome e' gia' nella tab (il ramo git resta)
+                                        .when(!superzed_has_tabs, |title_bar| {
+                                            title_bar.child(self.render_project_name(project_name, window, cx))
+                                        })
                                 })
                                 .when_some(
                                     repository.filter(|_| is_git_enabled),

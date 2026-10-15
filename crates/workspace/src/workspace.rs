@@ -8,6 +8,12 @@ mod multi_workspace;
 #[cfg(test)]
 mod multi_workspace_tests;
 pub mod notifications;
+// superzed: layout canvas | editor nel center e stato per progetto
+pub mod superzed_layout;
+// superzed: conferma Y/N da tastiera
+pub mod superzed_confirm;
+// superzed: tab di progetto (rese nel title bar)
+pub mod superzed_tabs;
 pub mod pane;
 pub mod pane_group;
 pub mod path_list {
@@ -1653,6 +1659,8 @@ pub struct Workspace {
     persisted_recent_navigation_history: Vec<PathBuf>,
     last_active_project_path: Option<ProjectPath>,
     restoring_workspace: bool,
+    // superzed: canvas e stato per progetto (vedi superzed_layout.rs)
+    superzed: superzed_layout::SuperzedWorkspace,
 }
 
 impl EventEmitter<Event> for Workspace {}
@@ -2155,6 +2163,8 @@ impl Workspace {
             persisted_recent_navigation_history: Vec::new(),
             last_active_project_path: None,
             restoring_workspace: false,
+            // superzed:
+            superzed: Default::default(),
         }
     }
 
@@ -6084,6 +6094,8 @@ impl Workspace {
         match event {
             pane::Event::AddItem { item } => {
                 item.added_to_pane(self, pane.clone(), window, cx);
+                // superzed: l'area editor compare con il primo item
+                self.superzed_on_center_items_changed(window, cx);
                 cx.emit(Event::ItemAdded {
                     item: item.boxed_clone(),
                 });
@@ -6157,6 +6169,8 @@ impl Workspace {
                 cx.emit(Event::ItemRemoved {
                     item_id: item.item_id(),
                 });
+                // superzed: l'area editor sparisce con l'ultimo item
+                self.superzed_on_center_items_changed(window, cx);
             }
             pane::Event::Focus => {
                 window.invalidate_character_coordinates();
@@ -6622,7 +6636,16 @@ impl Workspace {
             project.set_active_path(active_entry.clone(), cx)
         });
 
-        if focus_changed && let Some(project_path) = &active_entry {
+        // Infer the active repository only from singleton items.
+        // A multibuffer's active path represents the cursor's location within
+        // an aggregate view, so we assume it's not the user's intent to switch
+        // repositories.
+        if focus_changed
+            && let Some(project_path) = &active_entry
+            && self
+                .active_item(cx)
+                .is_some_and(|item| item.buffer_kind(cx) == ItemBufferKind::Singleton)
+        {
             let git_store_entity = self.project.read(cx).git_store().clone();
             git_store_entity.update(cx, |git_store, cx| {
                 git_store.set_active_repo_for_path(project_path, cx);
@@ -8855,6 +8878,19 @@ impl Workspace {
         cx.notify();
     }
 
+    // superzed: se c'e' un canvas, il center diventa `canvas | editor`
+    fn render_center(
+        &self,
+        render_cx: &PaneRenderContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let editor = self
+            .render_center_upstream(render_cx, window, cx)
+            .into_any_element();
+        superzed_layout::render_canvas_and_editor(self, editor, window, cx)
+    }
+
     /// Renders the center pane group wrapped in a `Main` landmark so assistive
     /// technology recognizes the editor as the main region and can navigate to
     /// it. While a screen reader is active the wrapper is also the focus target
@@ -8862,7 +8898,7 @@ impl Workspace {
     /// focusing it announces "Editor" instead of falling back to the whole
     /// window. We only make it focusable in that case so it never adds a hitbox
     /// or intercepts mouse focus for other users.
-    fn render_center(
+    fn render_center_upstream(
         &self,
         render_cx: &PaneRenderContext,
         window: &mut Window,
@@ -10350,6 +10386,9 @@ pub async fn apply_restored_multiworkspace_state(
             })
             .ok();
     }
+
+    // superzed: riapre come workspace vivi anche i progetti non attivi (tab)
+    crate::superzed_tabs::open_restored_tabs(window_handle, fs.clone(), cx).await;
 }
 
 fn restore_native_window_state(

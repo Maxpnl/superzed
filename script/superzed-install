@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Aggiorna /Applications/superzed.app sostituendo solo zed e cli, con il profilo
+# incrementale superzed-local. Per un bundle nuovo da zero resta script/bundle-mac -i.
+
+set -euo pipefail
+
+app_path="/Applications/superzed.app"
+profile="superzed-local"
+
+if [ ! -d "$app_path" ]; then
+    echo "$app_path non esiste: crealo una volta con script/bundle-mac -i" >&2
+    exit 1
+fi
+
+export ZED_RELEASE_CHANNEL="$(cat crates/zed/RELEASE_CHANNEL)"
+export ZED_BUNDLE=true
+export CXXFLAGS="-stdlib=libc++"
+cargo build --profile "$profile" --package zed --package cli
+
+# mv invece di cp sopra il file: se superzed e' aperto, sovrascrivere il binario in uso
+# invalida la sua firma e macOS lo uccide; un nuovo inode lascia vivo il processo vecchio
+for binary in zed cli; do
+    cp "target/$profile/$binary" "$app_path/Contents/MacOS/$binary.new"
+    mv -f "$app_path/Contents/MacOS/$binary.new" "$app_path/Contents/MacOS/$binary"
+done
+
+# come bundle-mac senza certificato: firma ad-hoc, senza associated-domains
+sed '/com.apple.developer.associated-domains/,+1d' crates/zed/resources/zed.entitlements \
+    > "$app_path/Contents/Resources/zed.entitlements"
+codesign --force --deep --entitlements "$app_path/Contents/Resources/zed.entitlements" \
+    --sign "${MACOS_SIGNING_KEY:--}" "$app_path"
+
+echo "Aggiornato $app_path: riavvia superzed per usare la nuova build"

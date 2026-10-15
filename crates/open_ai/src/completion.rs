@@ -42,6 +42,19 @@ fn service_tier_for(speed: Option<language_model_core::Speed>) -> Option<Service
     }
 }
 
+/// Omitting effort enables reasoning on Sol/Luna, which then reject temperature.
+fn temperature_for_model(
+    model_id: &str,
+    temperature: Option<f32>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Option<f32> {
+    temperature.filter(|_| match model_id {
+        "gpt-6-astra" => false,
+        "gpt-6-sol" | "gpt-6-luna" => reasoning_effort == Some(ReasoningEffort::None),
+        _ => true,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatCompletionMaxTokensParameter {
     MaxCompletionTokens,
@@ -196,7 +209,11 @@ pub fn into_open_ai(
             None
         },
         stop: request.stop,
-        temperature: request.temperature.or(Some(1.0)),
+        temperature: temperature_for_model(
+            model_id,
+            request.temperature.or(Some(1.0)),
+            reasoning_effort,
+        ),
         max_completion_tokens: match max_tokens_parameter {
             ChatCompletionMaxTokensParameter::MaxCompletionTokens => max_output_tokens,
             ChatCompletionMaxTokensParameter::MaxTokens => None,
@@ -384,7 +401,7 @@ pub fn into_open_ai_response(
         store: Some(false),
         include,
         stream,
-        temperature,
+        temperature: temperature_for_model(model_id, temperature, reasoning_effort),
         top_p: None,
         max_output_tokens,
         parallel_tool_calls: if tools.is_empty() {
@@ -2296,6 +2313,67 @@ mod tests {
 
         let serialized = serde_json::to_value(&response).unwrap();
         assert_eq!(serialized.get("reasoning"), None);
+    }
+
+    #[test]
+    fn request_conversion_omits_unsupported_temperature() -> Result<()> {
+        use ReasoningEffort::{Medium, None as NoReasoning};
+
+        for (model_id, temperature, effort, expected_temperature) in [
+            ("gpt-6-astra", Some(0.25), None, None),
+            ("gpt-6-astra", None, None, None),
+            ("gpt-6-sol", Some(0.25), None, None),
+            ("gpt-6-sol", Some(0.25), Some(Medium), None),
+            ("gpt-6-sol", Some(0.25), Some(NoReasoning), Some(0.25)),
+            ("gpt-6-luna", Some(0.25), None, None),
+            ("gpt-6-luna", Some(0.25), Some(Medium), None),
+            ("gpt-6-luna", Some(0.25), Some(NoReasoning), Some(0.25)),
+            ("gpt-4o-mini", Some(0.25), None, Some(0.25)),
+            ("custom-model", Some(0.25), None, Some(0.25)),
+        ] {
+            let request = LanguageModelRequest {
+                temperature,
+                thinking_allowed: effort != Some(NoReasoning),
+                ..Default::default()
+            };
+            let response = into_open_ai_response(
+                request.clone(),
+                model_id,
+                true,
+                true,
+                None,
+                effort,
+                effort == Some(NoReasoning),
+                &OPEN_AI_PROVIDER_ID,
+            )?;
+            let chat = into_open_ai(
+                request,
+                model_id,
+                true,
+                true,
+                None,
+                ChatCompletionMaxTokensParameter::MaxCompletionTokens,
+                effort,
+                false,
+            )?;
+            assert_eq!(
+                response.reasoning.as_ref().map(|config| config.effort),
+                effort
+            );
+            assert_eq!(chat.reasoning_effort, effort);
+
+            for (endpoint, serialized) in [
+                ("responses", serde_json::to_value(response)?),
+                ("chat/completions", serde_json::to_value(chat)?),
+            ] {
+                assert_eq!(
+                    serialized.get("temperature"),
+                    expected_temperature.map(serde_json::Value::from).as_ref(),
+                    "{endpoint} temperature for {model_id} with {temperature:?}, {effort:?}",
+                );
+            }
+        }
+        Ok(())
     }
 
     /// `Speed::Fast` should translate to `service_tier: "priority"` on the

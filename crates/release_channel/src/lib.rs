@@ -47,7 +47,8 @@ pub fn app_identifier() -> &'static str {
         ReleaseChannel::Dev => "Zed-Editor-Dev",
         ReleaseChannel::Nightly => "Zed-Editor-Nightly",
         ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        // superzed: identificatore Windows distinto da Zed per il canale stable
+        ReleaseChannel::Stable => "superzed-Stable",
     }
 }
 
@@ -198,8 +199,11 @@ impl ReleaseChannel {
     }
 
     /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
+    ///
+    /// superzed: mai, gli aggiornamenti di zed.dev installerebbero Zed al posto di
+    /// superzed (le release sono su GitHub).
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
@@ -208,7 +212,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "Zed Dev",
             ReleaseChannel::Nightly => "Zed Nightly",
             ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Stable => "superzed",
         }
     }
 
@@ -230,7 +234,8 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "dev.zed.Zed-Dev",
             ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
             ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            // superzed: bundle/app id distinto da Zed per il canale stable
+            ReleaseChannel::Stable => "dev.superzed.superzed",
         }
     }
 

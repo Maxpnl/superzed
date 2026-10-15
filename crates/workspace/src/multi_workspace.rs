@@ -423,8 +423,10 @@ impl MultiWorkspace {
             .map_or(false, |s| s.is_threads_list_view_active(cx))
     }
 
-    pub fn multi_workspace_enabled(&self, cx: &App) -> bool {
-        !DisableAiSettings::get_global(cx).disable_ai && AgentSettings::get_global(cx).enabled
+    // superzed: i progetti multipli per finestra sono la base delle tab di progetto,
+    // indipendentemente dall'AI (upstream: !disable_ai && agent enabled)
+    pub fn multi_workspace_enabled(&self, _cx: &App) -> bool {
+        true
     }
 
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1928,6 +1930,8 @@ impl MultiWorkspace {
                 .visible_worktrees(cx)
                 .next()
                 .is_none()
+                // superzed: un untitled con nodi sul canvas resta come tab sua
+                && !self.workspace().read(cx).superzed_canvas_has_nodes(cx)
             {
                 Some(self.workspace().clone())
             } else {

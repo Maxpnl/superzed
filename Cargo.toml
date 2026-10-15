@@ -199,6 +199,24 @@ members = [
     "crates/sqlez",
     "crates/sqlez_macros",
     "crates/streaming_diff",
+    # superzed: azioni superzed::
+    "crates/superzed_actions",
+    # superzed: crate canvas (viewport, modello nodi, persistenza)
+    "crates/superzed_canvas",
+    # superzed: sidebar a quattro viste (sessioni, ricerca)
+    "crates/superzed_sidebar",
+    # superzed: socket locale per hook e status line
+    "crates/superzed_ipc",
+    # superzed: session model
+    "crates/superzed_sessions",
+    # superzed: notifiche (sottoprogetto 6)
+    "crates/superzed_notifications",
+    # superzed: account claude, quote e scheduler (sottoprogetto 3)
+    "crates/superzed_accounts",
+    # superzed: fonti esterne (sottoprogetto 5A)
+    "crates/superzed_sources",
+    # superzed: pipeline Fatto → GitHub (sottoprogetto 4)
+    "crates/superzed_done",
     "crates/sum_tree",
     "crates/svg_preview",
     "crates/syntax_theme",
@@ -467,6 +485,24 @@ snippets_ui = { path = "crates/snippets_ui" }
 sqlez = { path = "crates/sqlez" }
 sqlez_macros = { path = "crates/sqlez_macros" }
 streaming_diff = { path = "crates/streaming_diff" }
+# superzed: azioni superzed::
+superzed_actions = { path = "crates/superzed_actions" }
+# superzed: crate canvas (viewport, modello nodi, persistenza)
+superzed_canvas = { path = "crates/superzed_canvas" }
+# superzed: sidebar a quattro viste (sessioni, ricerca)
+superzed_sidebar = { path = "crates/superzed_sidebar" }
+# superzed: socket locale per hook e status line
+superzed_ipc = { path = "crates/superzed_ipc" }
+# superzed: session model
+superzed_sessions = { path = "crates/superzed_sessions" }
+# superzed: notifiche (sottoprogetto 6)
+superzed_notifications = { path = "crates/superzed_notifications" }
+# superzed: account claude, quote e scheduler (sottoprogetto 3)
+superzed_accounts = { path = "crates/superzed_accounts" }
+# superzed: fonti esterne (sottoprogetto 5A)
+superzed_sources = { path = "crates/superzed_sources" }
+# superzed: pipeline Fatto → GitHub (sottoprogetto 4)
+superzed_done = { path = "crates/superzed_done" }
 sum_tree = { path = "crates/sum_tree" }
 svg_preview = { path = "crates/svg_preview" }
 syntax_theme = { path = "crates/syntax_theme" }
@@ -1113,6 +1149,21 @@ inherits = "release"
 debug = "full"
 lto = false
 codegen-units = 16
+
+# superzed: profilo di sviluppo — incrementale, senza debuginfo, riusa target/spike
+[profile.spike]
+inherits = "dev"
+debug = false
+opt-level = 1
+
+# superzed: build dell'app installata (script/superzed-install) — ottimizzata come
+# release ma senza LTO e incrementale, cosi' una piccola modifica ricompila poco
+[profile.superzed-local]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = false
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow" }

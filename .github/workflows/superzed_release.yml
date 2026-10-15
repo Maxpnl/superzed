@@ -1,0 +1,164 @@
+# superzed: on every pushed `v*` or `superzed-v*` tag, build macOS (arm64) and Linux (x64)
+# with the upstream bundle scripts (unsigned) and publish them to a GitHub Release.
+# Everything runs on GitHub-hosted runners: macos-15 for macOS, ubuntu-24.04 for Linux.
+name: superzed release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "superzed-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish"
+        required: true
+      platforms:
+        description: "Platforms to build (comma separated: mac, linux, windows)"
+        required: false
+        default: "mac,linux"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: superzed-release-${{ github.event_name }}-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Standard runners are small: parallel codegen and no debug info keep the release
+  # build within a few hours (upstream builds with codegen-units=1 on 32-core machines).
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  bundle_mac:
+    name: macOS (arm64)
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'mac')
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+      # webrtc-sys doesn't build with the Xcode 15 SDK
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+          xcodebuild -version
+      - name: Bundle
+        run: ./script/bundle-mac aarch64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superzed-macos-aarch64
+          path: target/aarch64-apple-darwin/release/superzed-aarch64.dmg
+          if-no-files-found: error
+
+  bundle_linux:
+    name: Linux (x64)
+    if: github.event_name == 'push' || contains(github.event.inputs.platforms, 'linux')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    # like upstream: webrtc-sys doesn't compile with GCC
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Install dependencies
+        run: |
+          ./script/linux
+          sudo apt-get install -y clang-18
+          clang++-18 --version
+          rustup show active-toolchain || rustup toolchain install
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+      - name: Bundle
+        run: ./script/bundle-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superzed-linux-x86_64
+          path: target/release/superzed-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  bundle_windows:
+    name: Windows (x64)
+    # not on tags: superzed doesn't run on Windows yet (Unix socket IPC, sh hooks and
+    # processes); only when asked for by hand
+    if: contains(github.event.inputs.platforms, 'windows')
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      ZED_WORKSPACE: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+      - name: Bundle
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: script/bundle-windows.ps1 -Architecture x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superzed-windows-x86_64
+          path: target/superzed-x86_64.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [bundle_mac, bundle_linux, bundle_windows]
+    # also with only some platforms (manual dispatch): publishes what was built
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          cat > notes.md <<'EOF'
+          ## Install
+
+          **macOS (Apple Silicon)**: open `superzed-aarch64.dmg` and drag superzed to Applications.
+          The app is not signed: the first time, right-click it and choose Open, or run
+          `xattr -dr com.apple.quarantine /Applications/superzed.app`.
+
+          **Linux (x64)**: extract it and put the CLI on your PATH:
+          ```sh
+          tar -xzf superzed-linux-x86_64.tar.gz -C ~/.local
+          ln -sf ~/.local/superzed.app/bin/superzed ~/.local/bin/superzed
+          cp ~/.local/superzed.app/share/applications/dev.superzed.superzed.desktop ~/.local/share/applications/
+          cp -r ~/.local/superzed.app/share/icons ~/.local/share/
+          ```
+
+          superzed does not update itself: new versions are published here.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "superzed ${TAG#superzed-}" --notes-file notes.md --generate-notes --verify-tag
+          fi

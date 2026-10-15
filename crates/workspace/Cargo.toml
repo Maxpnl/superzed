@@ -62,6 +62,8 @@ settings.workspace = true
 smallvec.workspace = true
 sqlez.workspace = true
 strum.workspace = true
+# superzed: azioni superzed::
+superzed_actions.workspace = true
 task.workspace = true
 telemetry.workspace = true
 theme.workspace = true

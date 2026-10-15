@@ -15,7 +15,8 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+// superzed: nome dell'app per config/data/log/cache dir (~/.config/superzed, ...)
+pub const APP_NAME: &str = "superzed";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -634,4 +635,16 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
     GLOBAL_GITIGNORE_PATH
         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
         .clone()
+}
+
+// superzed: config e data dir distinte da Zed
+#[cfg(all(test, target_os = "macos"))]
+mod superzed_tests {
+    // nei test di `paths` nessuno chiama set_custom_data_dir, quindi valgono i rami di default
+    #[test]
+    fn app_name_is_superzed() {
+        assert_eq!(super::APP_NAME_LOWERCASE, "superzed");
+        assert!(super::config_dir().ends_with(".config/superzed"));
+        assert!(super::data_dir().ends_with("Library/Application Support/superzed"));
+    }
 }

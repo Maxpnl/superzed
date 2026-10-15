@@ -46,79 +46,12 @@ fn setup_multi_workspace<'a>(
     (multi_workspace, cx)
 }
 
+// superzed: rinominato e riadattato — il multi-workspace non collassa piu'
+// quando l'agente/AI viene disabilitato (era test_multi_workspace_collapses_when_agent_is_disabled)
 #[gpui::test]
-async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContext) {
-    init_test(cx);
-    let fs = FakeFs::new(cx.executor());
-    let project = Project::test(fs, [], cx).await;
-
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(mw.multi_workspace_enabled(cx));
-    });
-
-    multi_workspace.update_in(cx, |mw, _window, cx| {
-        mw.open_sidebar(cx);
-        assert!(mw.sidebar_open());
-    });
-
-    cx.update(|_window, cx| {
-        DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx);
-    });
-    cx.run_until_parked();
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should be closed when disable_ai is true"
-        );
-        assert!(
-            !mw.multi_workspace_enabled(cx),
-            "Multi-workspace should be disabled when disable_ai is true"
-        );
-    });
-
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.toggle_sidebar(window, cx);
-    });
-    multi_workspace.read_with(cx, |mw, _cx| {
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should remain closed when toggled with disable_ai true"
-        );
-    });
-
-    cx.update(|_window, cx| {
-        DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
-    });
-    cx.run_until_parked();
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(
-            mw.multi_workspace_enabled(cx),
-            "Multi-workspace should be enabled after re-enabling AI"
-        );
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should still be closed after re-enabling AI (not auto-opened)"
-        );
-    });
-
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.toggle_sidebar(window, cx);
-    });
-    multi_workspace.read_with(cx, |mw, _cx| {
-        assert!(
-            mw.sidebar_open(),
-            "Sidebar should open when toggled after re-enabling AI"
-        );
-    });
-}
-
-#[gpui::test]
-async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+async fn test_superzed_multi_workspace_not_collapsed_when_agent_disabled(
+    cx: &mut TestAppContext,
+) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
@@ -147,10 +80,13 @@ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppC
     cx.run_until_parked();
 
     multi_workspace.read_with(cx, |multi_workspace, cx| {
-        assert!(!multi_workspace.multi_workspace_enabled(cx));
-        assert!(!multi_workspace.sidebar_open());
-        assert_eq!(multi_workspace.workspaces().count(), 1);
-        assert!(multi_workspace.project_group_keys().is_empty());
+        assert!(multi_workspace.multi_workspace_enabled(cx));
+        assert_eq!(
+            multi_workspace.workspaces().count(),
+            2,
+            "i workspace non devono collassare quando l'agente e' disabilitato"
+        );
+        assert!(!multi_workspace.project_group_keys().is_empty());
     });
 }
 
@@ -1643,4 +1579,93 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
             "a disconnected workspace should not be selected as a fallback"
         );
     });
+}
+
+// superzed: con AI spenta i progetti in background devono restare vivi
+#[gpui::test]
+async fn test_superzed_workspaces_retained_with_ai_disabled(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx);
+    });
+    let fs = FakeFs::new(cx.executor());
+    let project_a = Project::test(fs.clone(), [], cx).await;
+    let project_b = Project::test(fs, [], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi_workspace.read_with(cx, |mw, cx| assert!(mw.multi_workspace_enabled(cx)));
+
+    let first = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let second = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx)
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.workspace(), &second);
+        assert!(
+            mw.workspaces().any(|ws| ws == &first),
+            "il primo workspace deve restare vivo dopo aver attivato il secondo"
+        );
+    });
+}
+
+// superzed: un terminale del progetto A resta vivo mentre e' attivo il progetto B
+#[gpui::test]
+async fn test_superzed_background_workspace_entities_survive_switch(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project_a = Project::test(fs.clone(), [], cx).await;
+    let project_b = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    let weak_project_a = project_a.downgrade();
+    drop(project_a);
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        weak_project_a.upgrade().is_some(),
+        "il Project (e quindi i suoi terminali) del workspace in background deve restare vivo"
+    );
+}
+
+// superzed: un progetto untitled con nodi sul canvas resta come tab sua quando si
+// apre una cartella (verifica manuale 2026-09-26: il canvas andava perso).
+#[gpui::test]
+async fn test_superzed_open_project_keeps_empty_workspace_with_canvas_nodes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" })).await;
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+    let empty_workspace = window.read_with(cx, |mw, _| mw.workspace().clone()).unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    empty_workspace.update_in(cx, |ws, window, cx| {
+        let view = cx.new(|_| gpui::Empty);
+        let focus = cx.focus_handle();
+        let _ = window;
+        ws.set_superzed_canvas(view.into(), focus, cx);
+    });
+    cx.update(|_, cx| cx.set_global(crate::superzed_layout::CanvasHasNodes(|_, _| true)));
+    let open_task = window
+        .update(cx, |mw, window, cx| {
+            mw.open_project(vec![PathBuf::from(path!("/project_a"))], OpenMode::Activate, window, cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let workspace_a = open_task.await.unwrap();
+    assert_ne!(workspace_a, empty_workspace);
+    window
+        .read_with(cx, |mw, _| {
+            assert_eq!(mw.workspaces().count(), 2, "l'untitled con nodi resta");
+            assert_eq!(mw.workspace(), &workspace_a);
+        })
+        .unwrap();
 }

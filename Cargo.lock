@@ -17629,6 +17629,198 @@ dependencies = [
 ]
 
 [[package]]
+name = "superzed_accounts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "log",
+ "menu",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "superzed_actions",
+ "superzed_ipc",
+ "superzed_notifications",
+ "superzed_sessions",
+ "tempfile",
+ "theme",
+ "theme_settings",
+ "ui",
+ "unicode-normalization",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "superzed_actions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "schemars 1.0.4",
+ "serde",
+]
+
+[[package]]
+name = "superzed_canvas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "editor",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "libc",
+ "log",
+ "menu",
+ "paths",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "superzed_accounts",
+ "superzed_actions",
+ "superzed_done",
+ "superzed_ipc",
+ "superzed_notifications",
+ "superzed_sessions",
+ "superzed_sources",
+ "task",
+ "tempfile",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "uuid",
+ "workspace",
+]
+
+[[package]]
+name = "superzed_done"
+version = "0.1.0"
+dependencies = [
+ "futures 0.3.34",
+ "gpui",
+ "log",
+ "serde",
+ "serde_json",
+ "superzed_sessions",
+ "superzed_sources",
+ "tempfile",
+]
+
+[[package]]
+name = "superzed_ipc"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde_json",
+ "smol",
+ "tempfile",
+]
+
+[[package]]
+name = "superzed_notifications"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui",
+ "log",
+ "paths",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "superzed_sessions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "gpui",
+ "log",
+ "paths",
+ "serde",
+ "serde_json",
+ "smol",
+ "superzed_ipc",
+ "tempfile",
+ "ui",
+ "util",
+ "uuid",
+]
+
+[[package]]
+name = "superzed_sidebar"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "db",
+ "editor",
+ "fs",
+ "git_ui",
+ "gpui",
+ "http_client",
+ "menu",
+ "project",
+ "project_panel",
+ "remote_connection",
+ "serde_json",
+ "settings",
+ "superzed_accounts",
+ "superzed_actions",
+ "superzed_canvas",
+ "superzed_done",
+ "superzed_ipc",
+ "superzed_notifications",
+ "superzed_sessions",
+ "superzed_sources",
+ "task",
+ "tempfile",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "superzed_sources"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "log",
+ "paths",
+ "serde",
+ "serde_json",
+ "smol",
+ "superzed_notifications",
+ "tempfile",
+ "url",
+ "util",
+]
+
+[[package]]
 name = "sval"
 version = "2.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22389,6 +22581,7 @@ dependencies = [
  "smallvec",
  "sqlez",
  "strum 0.28.0",
+ "superzed_actions",
  "task",
  "telemetry",
  "tempfile",
@@ -23005,6 +23198,14 @@ dependencies = [
  "snippet_provider",
  "snippets_ui",
  "spin 0.10.0",
+ "superzed_accounts",
+ "superzed_actions",
+ "superzed_canvas",
+ "superzed_done",
+ "superzed_notifications",
+ "superzed_sessions",
+ "superzed_sidebar",
+ "superzed_sources",
  "svg_preview",
  "sysinfo 0.39.6",
  "system_specs",

@@ -76,7 +76,6 @@ use settings::{
     SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
-use sidebar::Sidebar;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
 
@@ -425,6 +424,14 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
     }
 }
 
+// superzed: toglie variabili d'ambiente ereditate prima che partano thread o shell
+pub fn superzed_strip_env(names: &[&str]) {
+    for name in names {
+        // SAFETY: chiamata all'inizio di main, prima di creare thread
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
 pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
@@ -499,7 +506,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
-        let window_handle = window.window_handle();
+        let _window_handle = window.window_handle();
         let multi_workspace_handle = cx.entity();
         cx.subscribe_in(
             &multi_workspace_handle,
@@ -533,17 +540,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         )
         .detach();
 
-        cx.defer(move |cx| {
-            window_handle
-                .update(cx, |_, window, cx| {
-                    let sidebar =
-                        cx.new(|cx| Sidebar::new(multi_workspace_handle.clone(), window, cx));
-                    multi_workspace_handle.update(cx, |multi_workspace, cx| {
-                        multi_workspace.register_sidebar(sidebar, cx);
-                    });
-                })
-                .ok();
-        });
+        // superzed: la sidebar thread/progetti di Zed non viene registrata;
+        // la navigazione tra progetti passa dalle tab di superzed
     })
     .detach();
 
@@ -612,6 +610,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
         let pending_keystrokes_indicator =
             cx.new(|cx| which_key::PendingKeystrokesIndicator::new(window, cx));
+        // superzed: quote degli account claude (sottoprogetto 3)
+        let superzed_quota = cx.new(|cx| superzed_accounts::QuotaStatusItem::new(cx));
         let image_info = cx.new(|_cx| ImageInfo::new(workspace));
 
         let lsp_button_menu_handle = PopoverMenuHandle::default();
@@ -638,6 +638,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            // superzed: quote degli account claude, a destra
+            status_bar.add_right_item(superzed_quota, window, cx);
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
@@ -5960,6 +5962,8 @@ mod tests {
                 "skill_creator",
                 "snippets",
                 "stash_picker",
+                // superzed: namespace delle azioni della shell
+                "superzed",
                 "svg",
                 "syntax_tree_view",
                 "tab_switcher",
@@ -7514,7 +7518,9 @@ mod tests {
             )
         };
 
-        // Window A (dir1+dir2): 1 workspace restored, but 2 project group keys.
+        // Window A (dir1+dir2): 2 project group keys, and (superzed: every project tab
+        // is restored as its own live workspace, see `superzed_tabs::open_restored_tabs`)
+        // 2 workspaces, not 1.
         restored_a
             .read_with(cx, |mw, _| {
                 assert_eq!(
@@ -7524,7 +7530,7 @@ mod tests {
                         ProjectGroupKey::new(None, PathList::new(&[dir1])),
                     ]
                 );
-                assert_eq!(mw.workspaces().count(), 1);
+                assert_eq!(mw.workspaces().count(), 2);
             })
             .unwrap();
 
@@ -8305,5 +8311,324 @@ mod tests {
             .items
             .iter()
             .any(|item| matches!(item, OwnedMenuItem::Action { name, .. } if name == item_name))
+    }
+
+    // superzed: l'env ereditato (es. da nodeterm) non deve arrivare ai terminali
+    #[test]
+    fn test_superzed_strip_env_removes_variables() {
+        let name = "SUPERZED_TEST_STRIP_ENV";
+        // SAFETY: variabile usata solo da questo test
+        unsafe { std::env::set_var(name, "x") };
+        super::superzed_strip_env(&[name]);
+        assert!(std::env::var_os(name).is_none());
+        // superzed: anche le variabili di nodeterm (sottoprogetto 2a)
+        assert!(superzed_sessions::launch::NODETERM_VARS.contains(&"NODETERM_NODE_ID"));
+    }
+
+    // superzed: le azioni superzed non devono essere filtrate da disable_ai
+    #[test]
+    fn test_superzed_namespace_not_in_ai_filter() {
+        assert!(!AI_ACTION_NAMESPACES.iter().any(|ns| ns.starts_with("superzed")));
+    }
+
+    // superzed: risoluzione dei tasti con il keymap di default vero
+    fn superzed_resolve(cx: &mut TestAppContext, keystroke: &str, stack: &[&str]) -> Option<String> {
+        cx.update(|cx| {
+            let stack: Vec<gpui::KeyContext> =
+                stack.iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let (bindings, _) =
+                keymap.bindings_for_input(&[gpui::Keystroke::parse(keystroke).unwrap()], &stack);
+            bindings.first().map(|b| b.action().name().to_string())
+        })
+    }
+
+    fn superzed_keymap_test(cx: &mut TestAppContext) {
+        init_keymap_test(cx);
+        cx.update(|cx| {
+            superzed_canvas::init(cx);
+            load_default_keymap(cx);
+        });
+    }
+
+    // superzed: azioni raggiungibili solo dal clic (mai da tastiera), quindi senza
+    // binding di default: `ShowAccountLimits` si apre solo dal clic sui limiti in
+    // status bar (Task 18).
+    const CLICK_ONLY: &[&str] = &["superzed::ShowAccountLimits"];
+
+    #[gpui::test]
+    fn test_superzed_every_action_has_a_default_binding(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        cx.update(|cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            for name in superzed_actions::ALL_ACTION_NAMES {
+                if CLICK_ONLY.contains(name) {
+                    continue;
+                }
+                assert!(
+                    keymap.bindings().any(|b| b.action().name() == *name),
+                    "{name} senza binding di default"
+                );
+            }
+        });
+    }
+
+    // Review Focus 4
+    #[gpui::test]
+    fn test_superzed_keys_inside_canvas_terminal_resolve_to_superzed(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let stack = ["Workspace", "Canvas", "Terminal"];
+        for (key, action) in [
+            ("cmd-t", "superzed::NewTerminal"),
+            ("cmd-n", "superzed::NewClaudeNode"),
+            ("cmd-shift-n", "superzed::NewClaudeNodePick"),
+            ("cmd-shift-m", "superzed::NewClaudeNodeFromPrompt"),
+            ("cmd-w", "superzed::CloseNode"),
+            // zoom sempre del canvas intero, mai del solo nodo
+            ("cmd-=", "superzed::CanvasZoomIn"),
+            ("cmd--", "superzed::CanvasZoomOut"),
+            ("cmd-0", "superzed::CanvasZoomReset"),
+            ("cmd-alt-f", "superzed::ZoomToFocusedNode"),
+            ("ctrl-tab", "superzed::NextProjectTab"),
+            ("ctrl-1", "superzed::ActivateProjectTab"),
+            ("cmd-1", "superzed::SidebarView"),
+            ("cmd-5", "superzed::SidebarView"),
+            ("cmd-6", "superzed::SidebarView"),
+            ("cmd-j", "superzed::FocusCanvas"),
+        ] {
+            assert_eq!(superzed_resolve(cx, key, &stack).as_deref(), Some(action), "{key}");
+        }
+        // superzed: cmd-shift-n apre il picker degli account anche fuori dal canvas (non NewWindow)
+        assert_eq!(superzed_resolve(cx, "cmd-shift-n", &["Workspace"]).as_deref(), Some("superzed::NewClaudeNodePick"));
+        assert_eq!(superzed_resolve(cx, "cmd-shift-m", &["Workspace"]).as_deref(), Some("superzed::NewClaudeNodeFromPrompt"));
+        // superzed: nel picker frecce, invio ed esc sono del menu
+        let picker = ["Workspace", "SuperzedAccountPicker"];
+        for (key, action) in [
+            ("up", "menu::SelectPrevious"),
+            ("down", "menu::SelectNext"),
+            ("enter", "menu::Confirm"),
+            ("escape", "menu::Cancel"),
+        ] {
+            assert_eq!(superzed_resolve(cx, key, &picker).as_deref(), Some(action), "{key} nel picker");
+        }
+        // i tasti di modifica dei nodi e y/n restano al terminale
+        for key in ["backspace", "left", "enter", "escape", "y", "n", "cmd-a"] {
+            let got = superzed_resolve(cx, key, &stack);
+            assert!(
+                !got.as_deref().is_some_and(|a| a.starts_with("superzed::")),
+                "{key} nel terminale risolve a {got:?}"
+            );
+        }
+    }
+
+    // superzed: cmd+frecce e cmd-alt-destra/sinistra navigano fra le chat con il focus in
+    // un terminale del canvas (anche agganciato al kanban), sul canvas e sui contenitori;
+    // coprono i binding del terminale. Nelle note restano quelli dell'editor.
+    #[gpui::test]
+    fn test_superzed_chat_navigation_keys(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let keys = [
+            ("cmd-up", "superzed::FocusChatUp"),
+            ("cmd-down", "superzed::FocusChatDown"),
+            ("cmd-left", "superzed::FocusChatLeft"),
+            ("cmd-right", "superzed::FocusChatRight"),
+            ("cmd-alt-right", "superzed::FocusNextArea"),
+            ("cmd-alt-left", "superzed::FocusPreviousArea"),
+        ];
+        let stacks: [&[&str]; 6] = [
+            &["Workspace", "Canvas", "Terminal"],
+            &["Workspace", "Canvas", "KanbanChat", "Terminal"],
+            &["Workspace", "Canvas CanvasFocused"],
+            &["Workspace", "Canvas", "Kanban"],
+            &["Workspace", "Canvas", "Automations"],
+            &["Workspace", "Canvas", "SuperzedSourcePanel"],
+        ];
+        for stack in stacks {
+            for (key, action) in keys {
+                assert_eq!(superzed_resolve(cx, key, stack).as_deref(), Some(action), "{key} in {stack:?}");
+            }
+        }
+        // fuori dal canvas i terminali tengono i loro
+        let pane_terminal = ["Workspace", "Pane", "Terminal"];
+        assert_eq!(superzed_resolve(cx, "cmd-up", &pane_terminal).as_deref(), Some("terminal::ScrollPageUp"));
+        assert_eq!(superzed_resolve(cx, "cmd-right", &pane_terminal).as_deref(), Some("terminal::SendKeystroke"));
+        let note = ["Workspace", "Canvas", "Editor"];
+        assert_eq!(superzed_resolve(cx, "cmd-up", &note).as_deref(), Some("editor::MoveToBeginning"));
+        assert_eq!(superzed_resolve(cx, "cmd-left", &note).as_deref(), Some("editor::MoveToBeginningOfLine"));
+        // kanban: cmd-shift-frecce spostano ancora la card
+        let chat = ["Workspace", "Canvas", "KanbanChat", "Terminal"];
+        assert_eq!(superzed_resolve(cx, "cmd-shift-right", &chat).as_deref(), Some("superzed::MoveCardNext"));
+    }
+
+    // superzed: cmd-alt-destra/sinistra sono gia' di Zed per passare tra le tab di un pane
+    // (alt-cmd-left/right → pane::ActivatePreviousItem/ActivateNextItem, legati sul
+    // contesto "Pane"); nel canvas deve vincere l'azione superzed, fuori dal canvas quella
+    // di Zed deve restare intatta.
+    #[gpui::test]
+    fn test_superzed_focus_area_keys_do_not_break_pane_item_switching(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let canvas = ["Workspace", "Canvas CanvasFocused"];
+        assert_eq!(superzed_resolve(cx, "cmd-alt-right", &canvas).as_deref(), Some("superzed::FocusNextArea"));
+        assert_eq!(superzed_resolve(cx, "cmd-alt-left", &canvas).as_deref(), Some("superzed::FocusPreviousArea"));
+        let pane_editor = ["Workspace", "Pane", "Editor"];
+        assert_eq!(superzed_resolve(cx, "cmd-alt-right", &pane_editor).as_deref(), Some("pane::ActivateNextItem"));
+        assert_eq!(superzed_resolve(cx, "cmd-alt-left", &pane_editor).as_deref(), Some("pane::ActivatePreviousItem"));
+    }
+
+    // superzed: con il focus in uno dei quattro pannelli della sidebar (Sessioni, Fonti,
+    // Notifiche, Ricerca) cmd-alt-destra/sinistra risolvono comunque al cambio area (il
+    // gestore lato workspace inoltra al canvas del progetto attivo); cmd-frecce restano
+    // senza binding nuovo li' (nessun cambio di comportamento oltre al task).
+    #[gpui::test]
+    fn test_superzed_focus_area_keys_resolve_from_sidebar_panels(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let panels: [&[&str]; 4] = [
+            &["Workspace", "SuperzedSessions"],
+            &["Workspace", "SuperzedSources"],
+            &["Workspace", "SuperzedNotifications"],
+            &["Workspace", "SuperzedSearch"],
+        ];
+        for stack in panels {
+            assert_eq!(
+                superzed_resolve(cx, "cmd-alt-right", stack).as_deref(),
+                Some("superzed::FocusNextArea"),
+                "{stack:?}"
+            );
+            assert_eq!(
+                superzed_resolve(cx, "cmd-alt-left", stack).as_deref(),
+                Some("superzed::FocusPreviousArea"),
+                "{stack:?}"
+            );
+            let got = superzed_resolve(cx, "cmd-up", stack);
+            assert!(!got.as_deref().is_some_and(|a| a == "superzed::FocusChatUp"), "{stack:?}: {got:?}");
+        }
+    }
+
+    // superzed: form delle automazioni — invio nel prompt va a capo, cmd-invio salva da ogni campo
+    #[gpui::test]
+    fn test_superzed_automation_form_keys(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let prompt = ["Workspace", "SuperzedAutomationForm", "Editor mode=auto_height"];
+        let line = ["Workspace", "SuperzedAutomationForm", "Editor mode=single_line"];
+        assert_eq!(superzed_resolve(cx, "enter", &prompt).as_deref(), Some("editor::Newline"));
+        assert_eq!(superzed_resolve(cx, "cmd-enter", &prompt).as_deref(), Some("menu::Confirm"));
+        assert_eq!(superzed_resolve(cx, "tab", &prompt).as_deref(), Some("menu::SelectNext"));
+        assert_eq!(superzed_resolve(cx, "shift-tab", &prompt).as_deref(), Some("menu::SelectPrevious"));
+        assert_eq!(superzed_resolve(cx, "enter", &line).as_deref(), Some("menu::Confirm"));
+        assert_eq!(superzed_resolve(cx, "cmd-enter", &line).as_deref(), Some("menu::Confirm"));
+    }
+
+    // superzed: form delle connessioni (vista Fonti) — tab tra i campi, invio e cmd-invio salvano
+    #[gpui::test]
+    fn test_superzed_connection_form_keys(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let line = ["Workspace", "SuperzedConnectionForm", "Editor mode=single_line"];
+        assert_eq!(superzed_resolve(cx, "tab", &line).as_deref(), Some("menu::SelectNext"));
+        assert_eq!(superzed_resolve(cx, "shift-tab", &line).as_deref(), Some("menu::SelectPrevious"));
+        assert_eq!(superzed_resolve(cx, "enter", &line).as_deref(), Some("menu::Confirm"));
+        assert_eq!(superzed_resolve(cx, "cmd-enter", &line).as_deref(), Some("menu::Confirm"));
+    }
+
+    // superzed: anteprima Fatto → GitHub — invio nel corpo va a capo; nessun tasto scrive
+    // (il modale non gestisce menu::Confirm: vedi done_review::tests::enter_and_escape_never_write)
+    #[gpui::test]
+    fn test_superzed_done_review_keys(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let body = ["Workspace", "SuperzedDoneReview", "Editor mode=auto_height"];
+        let line = ["Workspace", "SuperzedDoneReview", "Editor mode=single_line"];
+        assert_eq!(superzed_resolve(cx, "enter", &body).as_deref(), Some("editor::Newline"));
+        for stack in [&body, &line] {
+            for key in ["enter", "cmd-enter", "ctrl-enter"] {
+                let got = superzed_resolve(cx, key, stack);
+                assert!(!got.as_deref().is_some_and(|a| a.starts_with("superzed::")), "{key} in {stack:?}: {got:?}");
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn test_superzed_keys_on_focused_canvas_and_elsewhere(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        let canvas = ["Workspace", "Canvas CanvasFocused"];
+        assert_eq!(superzed_resolve(cx, "backspace", &canvas).as_deref(), Some("superzed::CloseNode"));
+        assert_eq!(superzed_resolve(cx, "left", &canvas).as_deref(), Some("superzed::MoveSelectedNodes"));
+        assert_eq!(superzed_resolve(cx, "cmd-=", &canvas).as_deref(), Some("superzed::CanvasZoomIn"));
+        assert_eq!(superzed_resolve(cx, "cmd-t", &canvas).as_deref(), Some("superzed::NewTerminal"));
+        // editor: lo zoom resta quello di Zed, ctrl-1 va alle tab di progetto
+        let editor = ["Workspace", "Pane", "Editor"];
+        assert_eq!(superzed_resolve(cx, "cmd-=", &editor).as_deref(), Some("zed::IncreaseBufferFontSize"));
+        assert_eq!(superzed_resolve(cx, "ctrl-1", &editor).as_deref(), Some("superzed::ActivateProjectTab"));
+        assert_eq!(superzed_resolve(cx, "cmd-2", &editor).as_deref(), Some("superzed::SidebarView"));
+        assert_eq!(superzed_resolve(cx, "cmd-5", &editor).as_deref(), Some("superzed::SidebarView"));
+        assert_eq!(superzed_resolve(cx, "cmd-6", &editor).as_deref(), Some("superzed::SidebarView"));
+        // superzed: cmd-shift-w chiude la tab di progetto ovunque, non la finestra
+        // (verifica manuale 2026-09-26: il binding globale di Zed vinceva sotto Workspace)
+        for stack in [&editor[..], &canvas[..], &["Workspace", "Canvas", "Terminal"][..]] {
+            assert_eq!(superzed_resolve(cx, "cmd-shift-w", stack).as_deref(), Some("superzed::CloseProjectTab"));
+        }
+        assert_eq!(superzed_resolve(cx, "cmd-alt-shift-w", &editor).as_deref(), Some("workspace::CloseWindow"));
+        // pannello git: cmd-1 e' la vista della sidebar, non la tab interna
+        let git = ["Workspace", "GitPanel"];
+        assert_eq!(superzed_resolve(cx, "cmd-1", &git).as_deref(), Some("superzed::SidebarView"));
+        // nota sul canvas: lo zoom e' del canvas intero
+        let note = ["Workspace", "Canvas", "Editor"];
+        assert_eq!(superzed_resolve(cx, "cmd-=", &note).as_deref(), Some("superzed::CanvasZoomIn"));
+        assert_eq!(superzed_resolve(cx, "cmd--", &note).as_deref(), Some("superzed::CanvasZoomOut"));
+        assert_eq!(superzed_resolve(cx, "cmd-0", &note).as_deref(), Some("superzed::CanvasZoomReset"));
+        assert_eq!(superzed_resolve(cx, "cmd-alt-f", &note).as_deref(), Some("superzed::ZoomToFocusedNode"));
+        let note_full = ["Workspace", "Canvas", "Editor mode=full"];
+        assert_eq!(superzed_resolve(cx, "cmd-=", &note_full).as_deref(), Some("superzed::CanvasZoomIn"));
+        assert_eq!(superzed_resolve(cx, "cmd-alt-f", &canvas).as_deref(), Some("superzed::ZoomToFocusedNode"));
+        let kanban_node = ["Workspace", "Canvas", "Kanban"];
+        assert_eq!(superzed_resolve(cx, "cmd-alt-f", &kanban_node).as_deref(), Some("superzed::ZoomToFocusedNode"));
+        assert_eq!(superzed_resolve(cx, "cmd-=", &kanban_node).as_deref(), Some("superzed::CanvasZoomIn"));
+        // superzed: cmd-e in una nota e' FocusEditor (non buffer_search); i tasti di
+        // modifica dei nodi restano all'editor della nota
+        // (l'editor di una nota e' multilinea: mode == full, come nel binding di buffer_search)
+        assert_eq!(superzed_resolve(cx, "cmd-e", &note_full).as_deref(), Some("superzed::FocusEditor"));
+        for key in ["backspace", "left", "enter", "cmd-a"] {
+            let got = superzed_resolve(cx, key, &note_full);
+            assert!(
+                !got.as_deref().is_some_and(|a| a.starts_with("superzed::")),
+                "{key} nella nota risolve a {got:?}"
+            );
+        }
+        // superzed: cmd-g rende golden il nodo con il focus, anche da una sua chat
+        for stack in [&canvas[..], &["Workspace", "Canvas", "Terminal"][..], &["Workspace", "Canvas", "Kanban"][..]] {
+            assert_eq!(superzed_resolve(cx, "cmd-g", stack).as_deref(), Some("superzed::ToggleGolden"), "{stack:?}");
+        }
+        assert_eq!(superzed_resolve(cx, "cmd-g", &editor).as_deref(), Some("search::SelectNextMatch"), "nell'editor resta la ricerca");
+        // superzed: kanban (2b)
+        assert_eq!(superzed_resolve(cx, "cmd-alt-k", &canvas).as_deref(), Some("superzed::OpenKanban"));
+        let kanban = ["Workspace", "Canvas", "Kanban"];
+        assert_eq!(superzed_resolve(cx, "cmd-shift-right", &kanban).as_deref(), Some("superzed::MoveCardNext"));
+        assert_eq!(superzed_resolve(cx, "cmd-shift-left", &kanban).as_deref(), Some("superzed::MoveCardPrev"));
+        // superzed: cmd-n con il focus sul kanban → chat agganciata in Nuove (2b v2)
+        assert_eq!(superzed_resolve(cx, "cmd-n", &kanban).as_deref(), Some("superzed::NewClaudeNode"));
+        // superzed: con il focus nel terminale di una chat agganciata (2b v2)
+        let kanban_chat = ["Workspace", "Canvas", "KanbanChat", "Terminal"];
+        assert_eq!(superzed_resolve(cx, "cmd-shift-right", &kanban_chat).as_deref(), Some("superzed::MoveCardNext"));
+        assert_eq!(superzed_resolve(cx, "cmd-shift-left", &kanban_chat).as_deref(), Some("superzed::MoveCardPrev"));
+        assert_eq!(superzed_resolve(cx, "cmd-n", &kanban_chat).as_deref(), Some("superzed::NewClaudeNode"));
+        assert_eq!(superzed_resolve(cx, "cmd-=", &kanban_chat).as_deref(), Some("superzed::CanvasZoomIn"));
+        assert_eq!(superzed_resolve(cx, "cmd-alt-f", &kanban_chat).as_deref(), Some("superzed::ZoomToFocusedNode"));
+        assert_eq!(superzed_resolve(cx, "cmd-0", &kanban).as_deref(), Some("superzed::CanvasZoomReset"));
+    }
+
+    #[gpui::test]
+    fn test_superzed_user_keymap_override_wins(cx: &mut TestAppContext) {
+        superzed_keymap_test(cx);
+        cx.update(|cx| {
+            let user = settings::KeymapFile::load_panic_on_failure(
+                r#"[ { "context": "Canvas", "bindings": { "cmd-=": "superzed::CanvasZoomOut" } } ]"#,
+                cx,
+            );
+            reload_keymaps(cx, user);
+        });
+        assert_eq!(
+            superzed_resolve(cx, "cmd-=", &["Workspace", "Canvas"]).as_deref(),
+            Some("superzed::CanvasZoomOut")
+        );
     }
 }

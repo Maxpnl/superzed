@@ -14,4 +14,13 @@
     "light": "One Light",
     "dark": "One Dark",
   },
+  // superzed: AI di Zed spenta, le chat sono terminali con la CLI
+  "disable_ai": true,
+  // superzed: niente auto-update da zed.dev (sostituirebbe superzed con Zed)
+  "auto_update": false,
+  // superzed: file tree e git nella sidebar sinistra
+  "project_panel": { "dock": "left" },
+  "git_panel": { "dock": "left" },
+  // superzed: cmd-w sull'ultimo file chiude l'area editor, non la finestra
+  "when_closing_with_no_tabs": "keep_window_open",
 }

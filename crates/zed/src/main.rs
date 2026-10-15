@@ -5,15 +5,8 @@ mod reliability;
 mod watcher_debug;
 mod zed;
 
-// Ensure the binary name stays in sync with APP_NAME so that the paths used
-// at runtime (data dir, config dir, etc.) match what the binary is called.
-const _: () = assert!(
-    paths::APP_NAME_LOWERCASE
-        .as_bytes()
-        .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes()),
-    "paths::APP_NAME_LOWERCASE must match the binary name. \
-     Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
-);
+// superzed: il binario resta `zed` (script di bundle e cli lo cercano con questo nome),
+// mentre APP_NAME e' "superzed"; l'assert upstream sul nome del binario e' tolto.
 
 use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result};
@@ -199,6 +192,15 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
 fn main() {
+    // superzed: account ereditati e variabili di nodeterm (2a)
+    zed::superzed_strip_env(&["CLAUDE_CONFIG_DIR", "CODEX_HOME"]);
+    zed::superzed_strip_env(superzed_sessions::launch::NODETERM_VARS);
+    // superzed: variabili di una sessione Claude Code da cui superzed e' stato lanciato
+    // (altrimenti i claude dei nodi non salvano il transcript e il resume non va)
+    let claude_session_vars =
+        superzed_sessions::launch::inherited_claude_session_vars(std::env::vars().map(|(k, _)| k));
+    zed::superzed_strip_env(&claude_session_vars.iter().map(String::as_str).collect::<Vec<_>>());
+
     STARTUP_TIME.get_or_init(|| Instant::now());
 
     // If this process was re-executed as a Linux sandbox helper, run that mode
@@ -763,6 +765,20 @@ fn main() {
         });
         vim::init(cx);
         terminal_view::init(cx);
+        // superzed: azioni, canvas e sidebar
+        superzed_actions::init(cx);
+        // superzed: notifiche (sottoprogetto 6)
+        superzed_notifications::init(cx);
+        // superzed: sessioni claude (2a)
+        superzed_sessions::init(cx);
+        // superzed: account claude, quote e scheduler (sottoprogetto 3)
+        superzed_accounts::init(cx);
+        // superzed: fonti esterne e tunnel (sottoprogetto 5A)
+        superzed_sources::init(cx);
+        // superzed: pipeline Fatto → GitHub (sottoprogetto 4)
+        superzed_done::init(cx);
+        superzed_canvas::init(cx);
+        superzed_sidebar::init(cx);
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
         language_selector::init(cx);

@@ -6067,6 +6067,10 @@ mod tests {
         crate::tests::init_test(cx);
 
         let fs = fs::FakeFs::new(cx.executor());
+        // superzed: `apply_restored_multiworkspace_state` now reopens every restored
+        // project group as a live workspace (`open_restored_tabs`), which needs
+        // `<dyn Fs>::global` for the groups that aren't already active.
+        cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
 
         // Main git repo at /repo
         fs.insert_tree(

@@ -302,14 +302,20 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     cx.set_global(GlobalAutoUpdate(Some(auto_updater)));
 }
 
+/// superzed: le release sono su GitHub, il controllo manuale non va su zed.dev (che
+/// scaricherebbe Zed al posto di superzed).
+const SUPERZED_UPDATE_EXPLANATION: &str =
+    "Download new versions from https://github.com/Maxpnl/superzed/releases";
+
 pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION")
         .map(ToOwned::to_owned)
         .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
+        .or_else(|| Some(SUPERZED_UPDATE_EXPLANATION.to_owned()))
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "superzed doesn't update itself.",
             Some(&message),
             &["OK"],
             cx,

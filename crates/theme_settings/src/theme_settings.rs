@@ -26,7 +26,9 @@ pub use crate::schema::{
     ThemeColorsContent, ThemeContent, ThemeFamilyContent, ThemeStyleContent,
     WindowBackgroundContent, status_colors_refinement, syntax_overrides, theme_colors_refinement,
 };
-use crate::settings::adjust_buffer_font_size;
+// superzed: `adjust_buffer_font_size` sets an absolute buffer font size (Task 17's
+// per-project editor font); increase/decrease_buffer_font_size only step by 1px.
+pub use crate::settings::adjust_buffer_font_size;
 pub use crate::settings::{
     AgentBufferFontSize, AgentUiFontSize, BufferLineHeight, FontFamilyName,
     GitCommitBufferFontSize, IconThemeName, IconThemeSelection, MarkdownPreviewFontSize,

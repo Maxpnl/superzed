@@ -1,0 +1,70 @@
+# superzed: tests and clippy on GitHub-hosted runners, so nothing compiles on the
+# developers' machines.
+#
+# - push to `shell`: clippy plus the tests of every superzed_* crate.
+# - push to `remote-test/**`: the branches `script/remote-test` creates. The commit carries a
+#   `.remote-test-command` file with the one command to run.
+name: superzed ci
+
+on:
+  push:
+    branches:
+      - shell
+      - "remote-test/**"
+
+concurrency:
+  group: superzed-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # debug info would make the target dir too big for the runner's disk and the cache
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  check:
+    name: ${{ startsWith(github.ref_name, 'remote-test/') && 'remote test' || 'clippy + superzed tests' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          ./script/linux
+          # superzed tests spawn zsh
+          sudo apt-get install -y zsh
+          rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref_name == 'shell' }}
+
+      - name: Remote test command
+        if: startsWith(github.ref_name, 'remote-test/')
+        run: |
+          command=$(cat .remote-test-command)
+          echo "command: $command"
+          case "$command" in
+            "cargo "*|"./script/clippy"*) ;;
+            *) echo "::error::only cargo or ./script/clippy commands are allowed"; exit 2 ;;
+          esac
+          bash -c "$command"
+
+      - name: Clippy
+        if: github.ref_name == 'shell'
+        run: ./script/clippy -p superzed_accounts -p superzed_actions -p superzed_canvas -p superzed_done -p superzed_ipc -p superzed_notifications -p superzed_sessions -p superzed_sidebar -p superzed_sources
+
+      - name: Tests
+        # also when clippy fails: lint debt must not hide test results
+        if: ${{ !cancelled() && github.ref_name == 'shell' }}
+        run: cargo test -p superzed_accounts -p superzed_actions -p superzed_canvas -p superzed_done -p superzed_ipc -p superzed_notifications -p superzed_sessions -p superzed_sidebar -p superzed_sources

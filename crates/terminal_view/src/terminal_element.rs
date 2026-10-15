@@ -400,6 +400,39 @@ pub struct TerminalElement {
     interactivity: Interactivity,
     mode: TerminalMode,
     block_below_cursor: Option<Rc<BlockProperties>>,
+    // superzed: font size override per nodo terminale sul canvas
+    superzed_font_size: Option<Pixels>,
+}
+
+// superzed: override (nodo canvas) > terminal.font_size (settings) > buffer font size
+pub(crate) fn superzed_effective_font_size(
+    override_: Option<Pixels>,
+    settings: Option<Pixels>,
+    buffer: Pixels,
+) -> Pixels {
+    override_.or(settings).unwrap_or(buffer)
+}
+
+// superzed: sotto questo font i nodi del canvas non disegnano il terminale (vedi
+// `TerminalView::superzed_text_visible`): il font non si ferma mai al minimo, quindi lo
+// zoom non cambia righe e colonne del PTY; sotto i 7 px il testo e' solo rumore
+pub const SUPERZED_MIN_NODE_FONT: Pixels = px(7.);
+
+// superzed: a questo zoom il nodo del canvas non disegna il testo del terminale e
+// mostra la sua vista d'insieme (titolo e stato a dimensione fissa)
+pub fn superzed_overview(zoom: f32, base: Pixels) -> bool {
+    base * zoom < SUPERZED_MIN_NODE_FONT
+}
+
+// superzed: font del nodo = font base * zoom (canvas * nodo), in 7..72 px
+pub fn superzed_node_font_size(base: Pixels, zoom: Option<f32>) -> Option<Pixels> {
+    zoom.map(|z| (base * z).clamp(SUPERZED_MIN_NODE_FONT, px(72.)))
+}
+
+// superzed: altezza di riga allineata ai pixel del dispositivo, la stessa usata per le righe
+pub fn superzed_snapped_line_height(line_height: f32, scale: f32) -> f32 {
+    let scale = scale.max(1.0);
+    (line_height * scale).round().max(1.0) / scale
 }
 
 impl InteractiveElement for TerminalElement {
@@ -420,6 +453,8 @@ impl TerminalElement {
         cursor_visible: bool,
         block_below_cursor: Option<Rc<BlockProperties>>,
         mode: TerminalMode,
+        // superzed: font size override per nodo
+        superzed_font_size: Option<Pixels>,
     ) -> TerminalElement {
         TerminalElement {
             terminal,
@@ -431,6 +466,8 @@ impl TerminalElement {
             block_below_cursor,
             mode,
             interactivity: Default::default(),
+            // superzed:
+            superzed_font_size,
         }
         .track_focus(&focus)
     }
@@ -1237,11 +1274,14 @@ impl Element for TerminalElement {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
-                    TerminalMode::Standalone => terminal_settings
-                        .font_size
-                        .map_or(buffer_font_size, |size| {
-                            theme_settings::adjusted_font_size(size, cx)
-                        }),
+                    // superzed: override per nodo
+                    TerminalMode::Standalone => superzed_effective_font_size(
+                        self.superzed_font_size,
+                        terminal_settings
+                            .font_size
+                            .map(|size| theme_settings::adjusted_font_size(size, cx)),
+                        buffer_font_size,
+                    ),
                 };
 
                 let theme = cx.theme().clone();
@@ -1282,7 +1322,8 @@ impl Element for TerminalElement {
                 let (dimensions, line_height_px) = {
                     let rem_size = window.rem_size();
                     let font_pixels = text_style.font_size.to_pixels(rem_size);
-                    let line_height = f32::from(font_pixels) * line_height;
+                    // superzed: mut, nei nodi del canvas si allinea ai pixel del dispositivo
+                    let mut line_height = f32::from(font_pixels) * line_height;
                     let font_id = cx.text_system().resolve_font(&text_style.font());
 
                     let cell_width = text_system
@@ -1323,6 +1364,12 @@ impl Element for TerminalElement {
 
                         let rows =
                             ((available_height_device_px / line_height_device_px) as usize).max(1);
+                        // superzed: nei nodi del canvas i bounds usano la stessa altezza di riga
+                        // (allineata ai pixel) con cui si sono contate le righe: niente righe
+                        // che oscillano durante lo zoom
+                        if self.superzed_font_size.is_some() {
+                            line_height = superzed_snapped_line_height(line_height, scale_factor);
+                        }
                         let snapped_height_device_px = (rows as i32) * line_height_device_px;
                         let padding_device_px =
                             (available_height_device_px - snapped_height_device_px).max(0);
@@ -3001,5 +3048,47 @@ mod tests {
         // Negative: lines -7, -6, -5, -4
         assert_eq!(negative_filtered.first().unwrap().point.line, -7);
         assert_eq!(negative_filtered.last().unwrap().point.line, -4);
+    }
+}
+
+// superzed: font per nodo terminale sul canvas
+#[cfg(test)]
+mod superzed_tests {
+    use super::{
+        SUPERZED_MIN_NODE_FONT, superzed_effective_font_size, superzed_node_font_size,
+        superzed_overview, superzed_snapped_line_height,
+    };
+    use gpui::px;
+
+    #[test]
+    fn override_wins_over_settings_and_buffer() {
+        assert_eq!(superzed_effective_font_size(Some(px(20.)), Some(px(13.)), px(14.)), px(20.));
+        assert_eq!(superzed_effective_font_size(None, Some(px(13.)), px(14.)), px(13.));
+        assert_eq!(superzed_effective_font_size(None, None, px(14.)), px(14.));
+    }
+
+    #[test]
+    fn node_font_is_base_times_zoom_clamped() {
+        assert_eq!(superzed_node_font_size(px(14.), None), None);
+        assert_eq!(superzed_node_font_size(px(14.), Some(2.0)), Some(px(28.)));
+        assert_eq!(superzed_node_font_size(px(14.), Some(100.)), Some(px(72.)));
+        assert_eq!(superzed_node_font_size(px(14.), Some(0.01)), Some(px(7.)));
+    }
+
+    #[test]
+    fn overview_below_seven_pixels() {
+        assert_eq!(SUPERZED_MIN_NODE_FONT, px(7.));
+        assert!(!superzed_overview(0.5, px(14.)), "7 px esatti: testo disegnato");
+        assert!(superzed_overview(0.49, px(14.)), "appena sotto: vista d'insieme");
+        assert!(superzed_overview(0.3, px(14.)), "4,2 px: prima disegnato, ora no");
+        assert!(!superzed_overview(1.0, px(14.)));
+        assert!(superzed_overview(0.02, px(14.)));
+    }
+
+    #[test]
+    fn snapped_line_height_matches_device_pixels() {
+        assert_eq!(superzed_snapped_line_height(17.3, 2.0), 17.5);
+        assert_eq!(superzed_snapped_line_height(17.2, 1.0), 17.0);
+        assert_eq!(superzed_snapped_line_height(0.1, 1.0), 1.0, "mai zero");
     }
 }

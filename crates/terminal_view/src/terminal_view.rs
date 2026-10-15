@@ -91,6 +91,13 @@ pub struct SendText(String);
 #[action(namespace = terminal)]
 pub struct SendKeystroke(String);
 
+// superzed: il canvas legge il tasto inviato (Esc/ctrl-c interrompono claude)
+impl SendKeystroke {
+    pub fn keystroke(&self) -> &str {
+        &self.0
+    }
+}
+
 actions!(
     terminal,
     [
@@ -157,6 +164,8 @@ pub struct TerminalView {
     rename_editor_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
     _terminal_subscriptions: Vec<Subscription>,
+    // superzed: zoom del font per nodo del canvas (None = comportamento upstream)
+    superzed_font_zoom: Option<f32>,
 }
 
 #[derive(Default, Clone)]
@@ -304,7 +313,36 @@ impl TerminalView {
             rename_editor_subscription: None,
             _subscriptions: subscriptions,
             _terminal_subscriptions: terminal_subscriptions,
+            // superzed:
+            superzed_font_zoom: None,
         }
+    }
+
+    // superzed: a questo zoom del canvas il testo del terminale e' abbastanza grande da disegnarlo
+    pub fn superzed_text_visible(zoom: f32, cx: &App) -> bool {
+        !terminal_element::superzed_overview(zoom, Self::superzed_base_font_size(cx))
+    }
+
+    // superzed: font base come in TerminalElement (terminal.font_size o buffer font)
+    fn superzed_base_font_size(cx: &App) -> Pixels {
+        let buffer = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
+        let settings = TerminalSettings::get_global(cx)
+            .font_size
+            .map(|size| theme_settings::adjusted_font_size(size, cx));
+        terminal_element::superzed_effective_font_size(None, settings, buffer)
+    }
+
+    // superzed: zoom del font del nodo; il font si ricalcola a ogni render
+    pub fn superzed_set_font_zoom(&mut self, zoom: Option<f32>, cx: &mut Context<Self>) {
+        if self.superzed_font_zoom != zoom {
+            self.superzed_font_zoom = zoom;
+            cx.notify();
+        }
+    }
+
+    // superzed:
+    pub fn superzed_font_zoom(&self) -> Option<f32> {
+        self.superzed_font_zoom
     }
 
     /// Enable 'embedded' mode where the terminal displays the full content with an optional limit of lines.
@@ -1407,16 +1445,29 @@ impl Render for TerminalView {
                     .id("terminal-view-container")
                     .size_full()
                     .bg(cx.theme().colors().editor_background)
-                    .child(TerminalElement::new(
-                        terminal_handle,
-                        terminal_view_handle,
-                        self.workspace.clone(),
-                        self.focus_handle.clone(),
-                        focused,
-                        self.should_show_cursor(focused, cx),
-                        self.block_below_cursor.clone(),
-                        self.mode.clone(),
-                    ))
+                    // superzed: nodo del canvas oltre la soglia di lettura: la vista resta
+                    // (focus, tasti, menu) ma il testo non si disegna, cosi' griglia e PTY
+                    // non cambiano con lo zoom
+                    .map(|d| match self.superzed_font_zoom {
+                        Some(zoom) if !Self::superzed_text_visible(zoom, cx) => {
+                            d.debug_selector(|| "superzed-terminal-hidden".into())
+                        }
+                        _ => d.child(TerminalElement::new(
+                            terminal_handle,
+                            terminal_view_handle,
+                            self.workspace.clone(),
+                            self.focus_handle.clone(),
+                            focused,
+                            self.should_show_cursor(focused, cx),
+                            self.block_below_cursor.clone(),
+                            self.mode.clone(),
+                            // superzed: font del nodo
+                            terminal_element::superzed_node_font_size(
+                                Self::superzed_base_font_size(cx),
+                                self.superzed_font_zoom,
+                            ),
+                        )),
+                    })
                     .when(self.content_mode(window, cx).is_scrollable(), |div| {
                         let colors = cx.theme().colors();
                         div.custom_scrollbars(
