@@ -1,0 +1,538 @@
+//! Nodo Posta: le email del progetto (query Gmail salvata in project.json) lette via
+//! `gog`, il thread selezionato e, da un thread, una chat claude nel kanban. Un nodo per
+//! progetto, che il canvas non lascia chiudere.
+use crate::node::NodeContent;
+use chrono::{DateTime, Local};
+use editor::Editor;
+use gpui::{
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, Render, SharedString, Subscription, Task, Window,
+};
+use std::{sync::Arc, time::Duration};
+use superzed_sources::{
+    GmailClient, MailThread, Runner, ThreadSummary, chat_prompt,
+    gmail::{SEARCH_MAX, project_query},
+};
+use ui::{IconButton, IconName, IconSize, Label, LabelSize, Tooltip, prelude::*, utils::WithRemSize};
+
+pub const MAIL_SIZE: (f32, f32) = (900., 560.);
+pub const MAIL_TITLE: &str = "mail";
+pub const REFRESH_EVERY: Duration = Duration::from_secs(5 * 60);
+const NOT_CONFIGURED: &str = "Set the account and the project query, then press Enter";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MailPanelEvent {
+    /// Account o query cambiati: il canvas salva.
+    SettingsChanged,
+    OpenChat { prompt: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum MailStatus {
+    NotConfigured,
+    Idle,
+    Loading,
+    Error(String),
+}
+
+pub fn mail_data(data: &serde_json::Value) -> (String, String) {
+    let field = |key: &str| data.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    (field("account"), field("query"))
+}
+
+/// Testo del thread per una chat: oggetto, poi ogni messaggio con mittente e data.
+pub fn thread_context(thread: &MailThread) -> String {
+    let mut out = format!("Oggetto: {}\nThread Gmail: {}\n", thread.subject, thread.id);
+    for message in &thread.messages {
+        out.push_str(&format!("\n--- Da: {} · {} · id {}\n", message.from, message.date, message.id));
+        if !message.attachments.is_empty() {
+            out.push_str(&format!("Allegati: {}\n", message.attachments.join(", ")));
+        }
+        out.push_str(message.body.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+pub struct MailPanelView {
+    account: Entity<Editor>,
+    query: Entity<Editor>,
+    search: Entity<Editor>,
+    saved_account: String,
+    saved_query: String,
+    runner: Arc<dyn Runner>,
+    version_checked: bool,
+    threads: Vec<ThreadSummary>,
+    selected: Option<String>,
+    thread: Option<MailThread>,
+    status: MailStatus,
+    refreshed_at: Option<DateTime<Local>>,
+    focus: FocusHandle,
+    pub(crate) zoom: f32,
+    loading: Option<Task<()>>,
+    thread_loading: Option<Task<()>>,
+    _ticker: Task<()>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<MailPanelEvent> for MailPanelView {}
+
+fn single_line(text: &str, placeholder: &str, window: &mut Window, cx: &mut App) -> Entity<Editor> {
+    cx.new(|cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_placeholder_text(placeholder, window, cx);
+        editor.set_text(text, window, cx);
+        editor
+    })
+}
+
+impl MailPanelView {
+    pub fn new(account: String, query: String, runner: Arc<dyn Runner>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let account_editor = single_line(&account, "account (j.doe@example.com)", window, cx);
+        let query_editor = single_line(&query, "project query (from:@acme.example OR label:atlas)", window, cx);
+        let search = single_line("", "search in this project's mail", window, cx);
+        let ticker = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(REFRESH_EVERY).await;
+            if this.update(cx, |v, cx| v.refresh(cx)).is_err() {
+                break;
+            }
+        });
+        let mut view = Self {
+            account: account_editor,
+            query: query_editor,
+            search,
+            saved_account: account,
+            saved_query: query,
+            runner,
+            version_checked: false,
+            threads: Vec::new(),
+            selected: None,
+            thread: None,
+            status: MailStatus::NotConfigured,
+            refreshed_at: None,
+            focus: cx.focus_handle(),
+            zoom: 1.,
+            loading: None,
+            thread_loading: None,
+            _ticker: ticker,
+            _subscriptions: Vec::new(),
+        };
+        view.refresh(cx);
+        view
+    }
+
+    pub fn search_editor(&self) -> &Entity<Editor> {
+        &self.search
+    }
+
+    pub fn threads(&self) -> &[ThreadSummary] {
+        &self.threads
+    }
+
+    pub fn shown_thread(&self) -> Option<&MailThread> {
+        self.thread.as_ref()
+    }
+
+    pub fn settings(&self) -> (String, String) {
+        (self.saved_account.clone(), self.saved_query.clone())
+    }
+
+    pub fn save_data(&self) -> serde_json::Value {
+        serde_json::json!({"account": self.saved_account, "query": self.saved_query})
+    }
+
+    pub fn status_text(&self) -> String {
+        match &self.status {
+            MailStatus::NotConfigured => NOT_CONFIGURED.to_string(),
+            MailStatus::Idle => self.refreshed_at.map(|t| format!("updated at {}", t.format("%H:%M"))).unwrap_or_default(),
+            MailStatus::Loading => "updating…".to_string(),
+            MailStatus::Error(message) => message.clone(),
+        }
+    }
+
+    pub(crate) fn client(&self) -> Option<GmailClient> {
+        let account = self.saved_account.trim();
+        (!account.is_empty()).then(|| GmailClient::new(self.runner.clone(), account))
+    }
+
+    /// Account e query del progetto si applicano con Invio (non a ogni tasto: ogni
+    /// modifica sarebbe una ricerca su Gmail).
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let account = self.account.read(cx).text(cx).trim().to_string();
+        let query = self.query.read(cx).text(cx).trim().to_string();
+        if account != self.saved_account || query != self.saved_query {
+            self.saved_account = account;
+            self.saved_query = query;
+            self.version_checked = false;
+            cx.emit(MailPanelEvent::SettingsChanged);
+        }
+        self.refresh(cx);
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let search = self.search.read(cx).text(cx);
+        let (Some(client), Some(query)) = (self.client(), project_query(&self.saved_query, &search)) else {
+            self.loading = None;
+            self.threads.clear();
+            self.status = MailStatus::NotConfigured;
+            cx.notify();
+            return;
+        };
+        // una ricerca in corso non ne fa partire un'altra
+        if self.loading.is_some() && self.status == MailStatus::Loading {
+            return;
+        }
+        let check_version = !self.version_checked;
+        self.status = MailStatus::Loading;
+        cx.notify();
+        self.loading = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                if check_version {
+                    client.check_version().await?;
+                }
+                client.search(&query, SEARCH_MAX).await
+            }
+            .await;
+            this.update(cx, |v, cx| {
+                match result {
+                    Ok(threads) => {
+                        v.version_checked = true;
+                        v.threads = threads;
+                        v.status = MailStatus::Idle;
+                        v.refreshed_at = Some(Local::now());
+                    }
+                    Err(message) => v.status = MailStatus::Error(message),
+                }
+                v.loading = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn select(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client() else {
+            return;
+        };
+        self.selected = Some(id.clone());
+        cx.notify();
+        // il task precedente si scarta: una risposta vecchia non sovrascrive la selezione nuova
+        self.thread_loading = Some(cx.spawn(async move |this, cx| {
+            let result = client.readable_thread(&id).await;
+            this.update(cx, |v, cx| {
+                if v.selected.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(thread) => v.thread = Some(thread),
+                    Err(message) => v.status = MailStatus::Error(message),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn open_chat(&self, cx: &mut Context<Self>) {
+        if let Some(thread) = &self.thread {
+            cx.emit(MailPanelEvent::OpenChat { prompt: chat_prompt("Gmail", &thread_context(thread)) });
+        }
+    }
+
+    fn render_row(&self, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
+        let id = thread.id.clone();
+        let selected = self.selected.as_deref() == Some(thread.id.as_str());
+        let date = thread.date.map(|d| d.with_timezone(&Local).format("%d/%m %H:%M").to_string()).unwrap_or_default();
+        let weight = if thread.unread { FontWeight::BOLD } else { FontWeight::NORMAL };
+        let colors = cx.theme().colors();
+        let (selected_background, hover_background) = (colors.element_selected, colors.element_hover);
+        v_flex()
+            .id(SharedString::from(format!("superzed-mail-row-{}", thread.id)))
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .when(selected, |d| d.bg(selected_background))
+            .hover(|d| d.bg(hover_background))
+            .on_click(cx.listener(move |v, _, _, cx| v.select(id.clone(), cx)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Label::new(thread.from.clone()).weight(weight).truncate())
+                    .child(Label::new(date).size(LabelSize::Small).color(Color::Muted)),
+            )
+            .child(Label::new(thread.subject.clone()).size(LabelSize::Small).weight(weight).truncate())
+            .into_any_element()
+    }
+
+    fn render_thread(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(thread) = &self.thread else {
+            return Label::new("Select a thread").color(Color::Muted).into_any_element();
+        };
+        let border = cx.theme().colors().border_variant;
+        let messages: Vec<AnyElement> = thread
+            .messages
+            .iter()
+            .map(|message| {
+                v_flex()
+                    .gap_1()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(Label::new(format!("{} · {}", message.from, message.date)).size(LabelSize::Small).color(Color::Muted))
+                    .when(!message.attachments.is_empty(), |d| {
+                        d.child(
+                            Label::new(format!("Attachments: {}", message.attachments.join(", ")))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .child(div().whitespace_normal().child(message.body.clone()))
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Label::new(thread.subject.clone()).weight(FontWeight::BOLD).truncate())
+                    .child(div().flex_1())
+                    .child(
+                        div().debug_selector(|| "superzed-mail-open-chat".into()).child(
+                            IconButton::new("superzed-mail-open-chat", IconName::Sparkle)
+                                .icon_size(IconSize::Medium)
+                                .tooltip(Tooltip::text("Open a chat in the kanban"))
+                                .on_click(cx.listener(|v, _, _, cx| v.open_chat(cx))),
+                        ),
+                    ),
+            )
+            .children(messages)
+            .into_any_element()
+    }
+}
+
+impl Focusable for MailPanelView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for MailPanelView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let status_color = match self.status {
+            MailStatus::Error(_) => Color::Error,
+            MailStatus::NotConfigured => Color::Warning,
+            _ => Color::Muted,
+        };
+        let header = v_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().w(px(220.)).child(self.account.clone()))
+                    .child(div().flex_1().child(self.query.clone()))
+                    .child(
+                        IconButton::new("superzed-mail-refresh", IconName::RotateCw)
+                            .icon_size(IconSize::Medium)
+                            .tooltip(Tooltip::text("Refresh"))
+                            .on_click(cx.listener(|v, _, _, cx| v.refresh(cx))),
+                    ),
+            )
+            .child(
+                Label::new("The project query is saved in .superzed/project.json, which may be committed")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex().gap_2().child(div().flex_1().child(self.search.clone())).child(
+                    div()
+                        .debug_selector(|| "superzed-mail-status".into())
+                        .child(Label::new(self.status_text()).size(LabelSize::Small).color(status_color).truncate()),
+                ),
+            );
+        let rows: Vec<AnyElement> = self.threads.iter().map(|thread| self.render_row(thread, cx)).collect();
+        let thread = self.render_thread(cx);
+        WithRemSize::new(window.rem_size() * self.zoom).size_full().child(
+            v_flex()
+                .key_context("SuperzedMailPanel")
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|v, _: &menu::Confirm, _, cx| v.apply_settings(cx)))
+                .size_full()
+                .bg(cx.theme().colors().panel_background)
+                .child(header)
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .items_start()
+                        .child(
+                            v_flex()
+                                .id("superzed-mail-rows")
+                                .w(px(300.))
+                                .h_full()
+                                .overflow_y_scroll()
+                                .px_1()
+                                .gap_1()
+                                .children(rows),
+                        )
+                        .child(v_flex().id("superzed-mail-thread").flex_1().h_full().overflow_y_scroll().px_2().child(thread)),
+                ),
+        )
+    }
+}
+
+/// Contenuto del nodo `NodeKind::Mail`.
+pub struct MailNode {
+    view: Entity<MailPanelView>,
+}
+
+impl MailNode {
+    pub fn new(view: Entity<MailPanelView>) -> Self {
+        Self { view }
+    }
+
+    pub fn view_entity(&self) -> &Entity<MailPanelView> {
+        &self.view
+    }
+}
+
+impl NodeContent for MailNode {
+    fn view(&self) -> AnyView {
+        self.view.clone().into()
+    }
+
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.focus_handle(cx)
+    }
+
+    fn set_font_zoom(&self, zoom: f32, cx: &mut App) {
+        self.view.update(cx, |v, cx| {
+            v.zoom = zoom;
+            cx.notify();
+        });
+    }
+
+    fn save_data(&self, cx: &App) -> serde_json::Value {
+        self.view.read(cx).save_data()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::{cell::RefCell, rc::Rc};
+    use superzed_sources::test_support::{FakeRunner, gmail_runner};
+
+    fn panel<'a>(
+        cx: &'a mut TestAppContext,
+        account: &str,
+        query: &str,
+        runner: Arc<FakeRunner>,
+    ) -> (Entity<MailPanelView>, &'a mut VisualTestContext) {
+        crate::test_support::init_test(cx);
+        let (account, query) = (account.to_string(), query.to_string());
+        let (view, cx) = cx.add_window_view(move |window, cx| MailPanelView::new(account, query, runner, window, cx));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    fn events(view: &Entity<MailPanelView>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<MailPanelEvent>>> {
+        let got = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let got = got.clone();
+            cx.subscribe(view, move |_, event: &MailPanelEvent, _| got.borrow_mut().push(event.clone())).detach();
+        });
+        got
+    }
+
+    #[gpui::test]
+    async fn without_a_query_gog_is_never_called(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "  ", runner.clone());
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        assert_eq!(runner.calls().len(), 0);
+        assert!(view.read_with(cx, |v, _| v.status_text()).contains("Set the account and the project query"));
+    }
+
+    #[gpui::test]
+    async fn the_node_search_narrows_the_project_query(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example OR label:atlas", runner.clone());
+        assert_eq!(view.read_with(cx, |v, _| v.threads().len()), 2);
+        view.update_in(cx, |v, window, cx| {
+            v.search_editor().update(cx, |e, cx| e.set_text("policy", window, cx));
+            v.refresh(cx);
+        });
+        cx.run_until_parked();
+        let last = runner.calls().into_iter().filter(|c| c.line().contains("gmail search")).last().unwrap();
+        assert_eq!(last.args.last().map(String::as_str), Some("(from:@acme.example OR label:atlas) policy"));
+    }
+
+    #[gpui::test]
+    async fn refreshes_every_five_minutes(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (_view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        assert_eq!(runner.count("gmail search"), 1);
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail search"), 2);
+    }
+
+    #[gpui::test]
+    async fn missing_gog_shows_the_install_command(cx: &mut TestAppContext) {
+        let runner = FakeRunner::new();
+        runner.on("gog --version", Err(superzed_sources::RunError::NotFound("gog".into())));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner);
+        assert_eq!(view.read_with(cx, |v, _| v.status_text()), superzed_sources::gmail::GOG_MISSING);
+    }
+
+    #[gpui::test]
+    async fn a_late_answer_for_an_old_selection_is_dropped(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on(
+            "gmail thread get t-100",
+            superzed_sources::test_support::ok(
+                r#"{"thread":{"id":"t-100","messages":[{"id":"m-101","headers":{"subject":"Atlas: listini"},"body":"x"}]}}"#,
+            ),
+        );
+        runner.on("gmail get m-101", superzed_sources::test_support::ok(r#"{"body":"x"}"#));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner);
+        // due selezioni senza parcheggiare: vince l'ultima
+        view.update(cx, |v, cx| {
+            v.select("t-200".into(), cx);
+            v.select("t-100".into(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.shown_thread().map(|t| t.id.clone())), Some("t-100".into()));
+    }
+
+    #[gpui::test]
+    async fn settings_are_saved_and_open_chat_carries_the_thread(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.save_data()),
+            serde_json::json!({"account": "j.doe@example.com", "query": "from:@acme.example"})
+        );
+        let got = events(&view, cx);
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.open_chat(cx));
+        let MailPanelEvent::OpenChat { prompt } = got.borrow().last().cloned().unwrap() else {
+            panic!("atteso OpenChat")
+        };
+        assert!(prompt.contains("Policy di annullamento approvata"));
+        assert!(prompt.contains("vale da lunedì"));
+        assert!(prompt.contains(superzed_sources::DATA_START));
+    }
+
+    #[test]
+    fn mail_data_reads_missing_keys_as_empty() {
+        assert_eq!(mail_data(&serde_json::Value::Null), (String::new(), String::new()));
+        assert_eq!(mail_data(&serde_json::json!({"account": "a", "query": "q"})), ("a".into(), "q".into()));
+    }
+}

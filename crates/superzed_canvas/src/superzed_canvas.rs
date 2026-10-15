@@ -8,6 +8,7 @@ pub mod commit_close;
 pub mod done_review;
 pub mod kanban_layout;
 pub mod kanban_node;
+pub mod mail_node;
 pub mod model;
 pub mod node;
 pub mod note_node;
