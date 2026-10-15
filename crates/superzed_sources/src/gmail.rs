@@ -259,6 +259,15 @@ impl GmailClient {
         }
         Ok(thread)
     }
+
+    pub async fn reply(&self, message_id: &str, body: &str, reply_all: bool) -> Result<(), String> {
+        let command = if reply_all { "reply-all" } else { "reply" };
+        self.run(false, &["gmail", command, message_id, "--body-file", "-"], Some(body.to_string())).await.map(|_| ())
+    }
+
+    pub async fn mark_thread_read(&self, thread_id: &str) -> Result<(), String> {
+        self.run(false, &["gmail", "thread", "modify", thread_id, "--remove", "UNREAD"], None).await.map(|_| ())
+    }
 }
 
 pub const MAIL_DIR: &str = ".superzed/mail";
@@ -422,6 +431,27 @@ mod tests {
         runner.on("gmail get m-202", fail(5, "not found"));
         let thread = futures::executor::block_on(client(&runner).readable_thread("t-200")).unwrap();
         assert_eq!(thread.messages[1].body, "Dimenticavo: vale da lunedì.");
+    }
+
+    #[test]
+    fn reply_sends_the_body_on_stdin_without_readonly() {
+        let runner = gmail_runner();
+        runner.on("gmail reply m-202", ok(r#"{"from":"j.doe@example.com","messageId":"m-300","threadId":"t-200"}"#));
+        futures::executor::block_on(client(&runner).reply("m-202", "Grazie, procediamo.", false)).unwrap();
+        let call = runner.calls().last().cloned().unwrap();
+        assert_eq!(call.args, ["--account", "j.doe@example.com", "--no-input", "--json", "gmail", "reply", "m-202", "--body-file", "-"]);
+        assert_eq!(call.stdin.as_deref(), Some("Grazie, procediamo."));
+        runner.on("gmail reply-all m-202", ok("{}"));
+        futures::executor::block_on(client(&runner).reply("m-202", "x", true)).unwrap();
+        assert!(runner.calls().last().unwrap().line().contains("gmail reply-all m-202"));
+    }
+
+    #[test]
+    fn marking_read_removes_unread_from_the_thread() {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", ok(r#"{"modified":"t-200","removedLabels":["UNREAD"]}"#));
+        futures::executor::block_on(client(&runner).mark_thread_read("t-200")).unwrap();
+        assert!(runner.calls().last().unwrap().line().ends_with("gmail thread modify t-200 --remove UNREAD"));
     }
 
     #[test]

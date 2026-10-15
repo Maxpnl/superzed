@@ -73,6 +73,11 @@ pub struct MailPanelView {
     /// Account e query della ricerca in corso: solo una richiesta identica viene saltata.
     loading_key: Option<(String, String)>,
     thread_loading: Option<Task<()>>,
+    reply: Entity<Editor>,
+    reply_all: bool,
+    /// Primo clic su «Send…»: si mostrano i destinatari e si invia solo con «Send now».
+    confirm_send: bool,
+    sending: Option<Task<()>>,
     _ticker: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -93,6 +98,11 @@ impl MailPanelView {
         let account_editor = single_line(&account, "account (j.doe@example.com)", window, cx);
         let query_editor = single_line(&query, "project query (from:@acme.example OR label:atlas)", window, cx);
         let search = single_line("", "search in this project's mail", window, cx);
+        let reply = cx.new(|cx| {
+            let mut editor = Editor::auto_height(3, 12, window, cx);
+            editor.set_placeholder_text("Reply…", window, cx);
+            editor
+        });
         let ticker = cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(REFRESH_EVERY).await;
             if this.update(cx, |v, cx| v.refresh(cx)).is_err() {
@@ -117,6 +127,10 @@ impl MailPanelView {
             loading: None,
             loading_key: None,
             thread_loading: None,
+            reply,
+            reply_all: false,
+            confirm_send: false,
+            sending: None,
             _ticker: ticker,
             _subscriptions: Vec::new(),
         };
@@ -237,6 +251,8 @@ impl MailPanelView {
         // mentre il nuovo si carica o se non si legge
         if self.selected.as_deref() != Some(id.as_str()) {
             self.thread = None;
+            self.confirm_send = false;
+            self.clear_reply(cx);
         }
         self.selected = Some(id.clone());
         cx.notify();
@@ -248,13 +264,113 @@ impl MailPanelView {
                     return;
                 }
                 match result {
-                    Ok(thread) => v.thread = Some(thread),
+                    Ok(thread) => {
+                        if thread.messages.iter().any(|message| message.unread) {
+                            v.mark_read(client, &id, cx);
+                        }
+                        v.thread = Some(thread);
+                    }
                     Err(message) => v.status = MailStatus::Error(message),
                 }
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Segnare letto non deve bloccare la lettura: se gog fallisce resta solo nel log.
+    fn mark_read(&mut self, client: GmailClient, id: &str, cx: &mut Context<Self>) {
+        if let Some(row) = self.threads.iter_mut().find(|row| row.id == id) {
+            row.unread = false;
+        }
+        let id = id.to_string();
+        cx.spawn(async move |_, _| {
+            if let Err(error) = client.mark_thread_read(&id).await {
+                log::info!("gmail: thread {id} non segnato come letto: {error}");
+            }
+        })
+        .detach();
+    }
+
+    fn clear_reply(&mut self, cx: &mut Context<Self>) {
+        // senza `Window` (selezione e fine invio arrivano da task): si svuota il buffer
+        if let Some(buffer) = self.reply.read(cx).buffer().read(cx).as_singleton() {
+            buffer.update(cx, |buffer, cx| buffer.set_text("", cx));
+        }
+    }
+
+    pub fn reply_editor(&self) -> &Entity<Editor> {
+        &self.reply
+    }
+
+    pub fn set_reply_all(&mut self, all: bool, cx: &mut Context<Self>) {
+        self.reply_all = all;
+        self.confirm_send = false;
+        cx.notify();
+    }
+
+    /// Destinatari mostrati prima dell'invio: gog li ricava allo stesso modo (Reply-To se
+    /// c'e', altrimenti From; a tutti aggiunge To e Cc).
+    pub fn send_summary(&self) -> Option<String> {
+        if !self.confirm_send {
+            return None;
+        }
+        let last = self.thread.as_ref()?.messages.last()?;
+        let to = if last.reply_to.is_empty() { last.from.clone() } else { last.reply_to.clone() };
+        Some(if self.reply_all {
+            let others: Vec<&str> =
+                [last.to.as_str(), last.cc.as_str()].into_iter().filter(|recipients| !recipients.is_empty()).collect();
+            format!("Reply all to {to}, {}", others.join(", "))
+        } else {
+            format!("Reply to {to}")
+        })
+    }
+
+    pub fn request_send(&mut self, cx: &mut Context<Self>) {
+        if self.reply.read(cx).text(cx).trim().is_empty() || self.thread.is_none() {
+            return;
+        }
+        self.confirm_send = true;
+        cx.notify();
+    }
+
+    pub fn cancel_send(&mut self, cx: &mut Context<Self>) {
+        self.confirm_send = false;
+        cx.notify();
+    }
+
+    pub fn confirm_send(&mut self, cx: &mut Context<Self>) {
+        if !self.confirm_send || self.sending.is_some() {
+            return;
+        }
+        let (Some(client), Some(thread)) = (self.client(), self.thread.clone()) else {
+            return;
+        };
+        let Some(last) = thread.messages.last().cloned() else {
+            return;
+        };
+        let body = self.reply.read(cx).text(cx);
+        let reply_all = self.reply_all;
+        self.confirm_send = false;
+        self.sending = Some(cx.spawn(async move |this, cx| {
+            let result = client.reply(&last.id, &body, reply_all).await;
+            this.update(cx, |v, cx| {
+                v.sending = None;
+                match result {
+                    // se nel frattempo e' cambiata la selezione l'editor e' gia' stato svuotato
+                    Ok(()) => {
+                        if v.selected.as_deref() == Some(thread.id.as_str()) {
+                            v.clear_reply(cx);
+                            v.select(thread.id.clone(), cx);
+                        }
+                    }
+                    Err(message) => v.status = MailStatus::Error(message),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     pub fn open_chat(&self, cx: &mut Context<Self>) {
@@ -331,6 +447,39 @@ impl MailPanelView {
                     ),
             )
             .children(messages)
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(self.reply.clone())
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("superzed-mail-reply-all", "Reply all")
+                                    .toggle_state(self.reply_all)
+                                    .on_click(cx.listener(|v, _, _, cx| v.set_reply_all(!v.reply_all, cx))),
+                            )
+                            .child(div().flex_1())
+                            .when_some(self.send_summary(), |d, summary| {
+                                d.child(Label::new(summary).size(LabelSize::Small))
+                                    .child(
+                                        Button::new("superzed-mail-cancel", "Cancel")
+                                            .on_click(cx.listener(|v, _, _, cx| v.cancel_send(cx))),
+                                    )
+                                    .child(
+                                        Button::new("superzed-mail-confirm", "Send now")
+                                            .on_click(cx.listener(|v, _, _, cx| v.confirm_send(cx))),
+                                    )
+                            })
+                            .when(!self.confirm_send, |d| {
+                                d.child(
+                                    Button::new("superzed-mail-send", "Send…")
+                                        .disabled(self.sending.is_some())
+                                        .on_click(cx.listener(|v, _, _, cx| v.request_send(cx))),
+                                )
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -591,6 +740,47 @@ mod tests {
         view.update(cx, |v, cx| v.open_chat(cx));
         assert!(got.borrow().is_empty(), "nessuna chat se il nuovo thread non si legge");
         assert!(view.read_with(cx, |v, _| v.shown_thread().is_none()));
+    }
+
+    #[gpui::test]
+    async fn send_asks_first_then_replies_to_the_last_message(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail reply m-202", superzed_sources::test_support::ok("{}"));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail thread modify t-200 --remove UNREAD"), 1, "aprire un thread non letto lo segna letto");
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Grazie, procediamo.", window, cx));
+            v.request_send(cx);
+        });
+        assert_eq!(runner.count("gmail reply"), 0, "il primo clic chiede conferma");
+        assert_eq!(view.read_with(cx, |v, _| v.send_summary()), Some("Reply to team@example.com".into()));
+        view.update(cx, |v, cx| v.confirm_send(cx));
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail reply m-202 --body-file -"), 1);
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "");
+    }
+
+    #[gpui::test]
+    async fn an_empty_reply_is_not_sent_and_a_failure_keeps_the_text(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail reply m-202", superzed_sources::test_support::fail(6, "forbidden"));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.request_send(cx));
+        assert_eq!(view.read_with(cx, |v, _| v.send_summary()), None, "testo vuoto: nessuna conferma");
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Testo", window, cx));
+            v.request_send(cx);
+            v.confirm_send(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "Testo");
+        assert!(view.read_with(cx, |v, _| v.status_text()).contains("forbidden"));
     }
 
     #[test]
