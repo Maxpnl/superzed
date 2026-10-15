@@ -3,8 +3,8 @@
 pub mod clickhouse;
 pub mod connections;
 pub mod forms;
-pub mod gmail;
 pub mod github;
+pub mod gmail;
 pub mod item;
 pub mod runner;
 pub mod secrets;
@@ -22,7 +22,7 @@ pub use connections::{
 };
 pub use forms::{FormField, connection_from_fields, fields_of, form_fields, format_forwards, insecure_http_warning, parse_forwards};
 pub use github::GithubSource;
-pub use gmail::{Draft, GmailClient, MailMessage, MailThread, ThreadSummary, project_query};
+pub use gmail::{Draft, DraftContent, GmailClient, MailMessage, MailThread, ThreadSummary, project_query};
 pub use item::{
     SOURCES_VIEW, choice_label,
     CONTEXT_MAX_CHARS, DATA_END, DATA_START, Filter, FilterField, FilterKind, Item, Severity, Source, SourceKind, chat_prompt,

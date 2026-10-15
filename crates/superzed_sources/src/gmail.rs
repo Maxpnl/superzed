@@ -56,6 +56,14 @@ pub struct MailThread {
     pub messages: Vec<MailMessage>,
 }
 
+/// Bozza letta da Gmail: il testo e i destinatari da mostrare prima dell'invio.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DraftContent {
+    pub body: String,
+    pub to: String,
+    pub cc: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
     pub id: String,
@@ -156,6 +164,13 @@ pub fn parse_thread(text: &str) -> Result<MailThread, String> {
 pub fn parse_message_body(text: &str) -> Result<String, String> {
     let root = parse_json("gmail get", text)?;
     root.get("body").and_then(Value::as_str).map(str::to_string).ok_or_else(|| bad_output("gmail get", text))
+}
+
+/// Destinatari (`to`, `cc`) di un `gmail get`: intestazioni mancanti restano vuote.
+pub fn parse_message_recipients(text: &str) -> Result<(String, String), String> {
+    let root = parse_json("gmail get", text)?;
+    let headers = root.get("headers").cloned().unwrap_or(Value::Null);
+    Ok((string_at(&headers, "to"), string_at(&headers, "cc")))
 }
 
 pub fn parse_drafts(text: &str) -> Result<Vec<Draft>, String> {
@@ -273,8 +288,10 @@ impl GmailClient {
         parse_drafts(&self.run(true, &["gmail", "drafts", "list", "--max", "100"], None).await?)
     }
 
-    pub async fn draft_body(&self, draft: &Draft) -> Result<String, String> {
-        parse_message_body(&self.run(true, &["gmail", "get", &draft.message_id], None).await?)
+    pub async fn draft_content(&self, draft: &Draft) -> Result<DraftContent, String> {
+        let text = self.run(true, &["gmail", "get", &draft.message_id], None).await?;
+        let (to, cc) = parse_message_recipients(&text)?;
+        Ok(DraftContent { body: parse_message_body(&text)?, to, cc })
     }
 
     /// `--thread-id`: gog rifiuta un update senza oggetto, thread o messaggio a cui rispondere.
@@ -330,11 +347,26 @@ pub fn inbox_truncated(found: usize) -> bool {
     found >= INBOX_MAX_THREADS
 }
 
-pub fn inbox_json(account: &str, query: &str, since: &str, truncated: bool, threads: &[MailThread]) -> String {
-    serde_json::to_string_pretty(
-        &serde_json::json!({"account": account, "query": query, "since": since, "truncated": truncated, "threads": threads}),
-    )
-        .unwrap_or_else(|error| format!("{{\"error\": \"{error}\"}}"))
+/// `errors`: thread della ricerca che gog non ha letto (id, messaggio), saltati.
+pub fn inbox_json(
+    account: &str,
+    query: &str,
+    since: &str,
+    truncated: bool,
+    threads: &[MailThread],
+    errors: &[(String, String)],
+) -> String {
+    let errors: Vec<Value> =
+        errors.iter().map(|(thread_id, error)| serde_json::json!({"thread_id": thread_id, "error": error})).collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "account": account,
+        "query": query,
+        "since": since,
+        "truncated": truncated,
+        "errors": errors,
+        "threads": threads,
+    }))
+    .unwrap_or_else(|error| format!("{{\"error\": \"{error}\"}}"))
 }
 
 #[cfg(test)]
@@ -396,6 +428,15 @@ mod tests {
     #[test]
     fn message_body_keeps_line_breaks() {
         assert_eq!(parse_message_body(GOG_MESSAGE_1).unwrap(), "Ciao,\nla policy è approvata.\n\nPotete procedere con l'annullamento.\n");
+    }
+
+    #[test]
+    fn message_recipients_are_read_from_the_headers() {
+        let draft = r#"{"headers": {"from": "j.doe@example.com", "to": "team@example.com", "cc": "bob@example.com"}, "body": "x"}"#;
+        assert_eq!(parse_message_recipients(draft).unwrap(), ("team@example.com".into(), "bob@example.com".into()));
+        assert_eq!(parse_message_recipients(GOG_MESSAGE_1).unwrap(), (String::new(), String::new()));
+        assert_eq!(parse_message_recipients(r#"{"body": "x"}"#).unwrap(), (String::new(), String::new()));
+        assert!(parse_message_recipients("non json").is_err());
     }
 
     #[test]
@@ -483,8 +524,11 @@ mod tests {
         let c = client(&runner);
         let drafts = futures::executor::block_on(c.drafts()).unwrap();
         assert!(runner.calls().last().unwrap().line().contains("--readonly gmail drafts list --max 100"));
-        runner.on("gmail get m-900", ok(r#"{"body":"Bozza di Claude\n"}"#));
-        assert_eq!(futures::executor::block_on(c.draft_body(&drafts[0])).unwrap(), "Bozza di Claude\n");
+        runner.on("gmail get m-900", ok(r#"{"headers":{"to":"team@example.com"},"body":"Bozza di Claude\n"}"#));
+        assert_eq!(
+            futures::executor::block_on(c.draft_content(&drafts[0])).unwrap(),
+            DraftContent { body: "Bozza di Claude\n".into(), to: "team@example.com".into(), cc: String::new() }
+        );
         runner.on("gmail drafts update r-1", ok("{}"));
         futures::executor::block_on(c.update_draft(&drafts[0], "Bozza rivista")).unwrap();
         let call = runner.calls().last().cloned().unwrap();
@@ -530,11 +574,14 @@ mod tests {
         thread.messages[0].body = "x".repeat(50);
         truncate_bodies(&mut thread, 10);
         assert_eq!(thread.messages[0].body.chars().count(), 10 + "… (troncato)".chars().count());
-        let text = inbox_json("j.doe@example.com", "(from:@acme.example)", "after:1", false, &[thread.clone()]);
+        let text = inbox_json("j.doe@example.com", "(from:@acme.example)", "after:1", false, &[thread.clone()], &[]);
         let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["truncated"], false);
-        let truncated: Value = serde_json::from_str(&inbox_json("a", "q", "after:1", true, &[thread])).unwrap();
+        assert_eq!(value["errors"], serde_json::json!([]));
+        let errors = [("t-100".to_string(), "gog: not found".to_string())];
+        let truncated: Value = serde_json::from_str(&inbox_json("a", "q", "after:1", true, &[thread], &errors)).unwrap();
         assert_eq!(truncated["truncated"], true);
+        assert_eq!(truncated["errors"], serde_json::json!([{"thread_id": "t-100", "error": "gog: not found"}]));
         assert_eq!(value["account"], "j.doe@example.com");
         assert_eq!(value["threads"][0]["thread_id"], "t-200");
         assert_eq!(value["threads"][0]["messages"][1]["message_id"], "m-202");

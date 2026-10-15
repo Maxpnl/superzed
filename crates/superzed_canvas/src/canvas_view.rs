@@ -774,10 +774,20 @@ impl CanvasView {
                 let summaries = client.search(&full_query, INBOX_MAX_THREADS).await?;
                 let truncated = inbox_truncated(summaries.len());
                 let mut threads = Vec::new();
+                let mut errors = Vec::new();
+                // un thread che gog non legge si salta e si segnala: interrompere lascerebbe
+                // fermo l'ultimo controllo e ogni giro successivo ritroverebbe lo stesso thread
                 for summary in summaries {
-                    let mut thread = client.thread(&summary.id, true).await?;
-                    truncate_bodies(&mut thread, superzed_sources::CONTEXT_MAX_CHARS);
-                    threads.push(thread);
+                    match client.thread(&summary.id, true).await {
+                        Ok(mut thread) => {
+                            truncate_bodies(&mut thread, superzed_sources::CONTEXT_MAX_CHARS);
+                            threads.push(thread);
+                        }
+                        Err(error) => {
+                            log::warn!("gmail: thread {} non letto per il prompt: {error}", summary.id);
+                            errors.push((summary.id, error));
+                        }
+                    }
                 }
                 fs.create_dir(&dir).await.map_err(|error| format!("{}: {error}", dir.display()))?;
                 let ignore = dir.join(".gitignore");
@@ -787,7 +797,7 @@ impl CanvasView {
                         .map_err(|error| format!("{}: {error}", ignore.display()))?;
                 }
                 let inbox = dir.join(INBOX_FILE);
-                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, truncated, &threads))
+                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, truncated, &threads, &errors))
                     .await
                     .map_err(|error| format!("{}: {error}", inbox.display()))?;
                 fs.atomic_write(state_path.clone(), state_json(now))
@@ -6141,6 +6151,28 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn an_unreadable_thread_is_skipped_and_listed_in_the_inbox(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let runner = superzed_sources::test_support::gmail_runner();
+        runner.on("gmail thread get t-100", superzed_sources::test_support::fail(1, "boom"));
+        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
+        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        configure_mail(&canvas, cx);
+        open_mail_prompt_for_test(&canvas, cx);
+        let inbox: serde_json::Value =
+            serde_json::from_str(&fs.load(Path::new("/repo/.superzed/mail/inbox.json")).await.unwrap()).unwrap();
+        let threads: Vec<&str> =
+            inbox["threads"].as_array().unwrap().iter().map(|thread| thread["thread_id"].as_str().unwrap()).collect();
+        assert_eq!(threads, ["t-200"]);
+        assert_eq!(inbox["errors"], json!([{"thread_id": "t-100", "error": "gog: boom"}]));
+        assert!(fs.load(Path::new("/repo/.superzed/mail/state.json")).await.unwrap().contains("last_check"));
+        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
+        assert!(command.contains("/repo/.superzed/mail/inbox.json"), "{command}");
+        close_all(&canvas, cx);
+    }
+
+    #[gpui::test]
     async fn a_failed_search_does_not_move_the_last_check(cx: &mut TestAppContext) {
         let runner = superzed_sources::test_support::gmail_runner();
         // solo la ricerca del prompt (max 30) fallisce, quella del nodo (max 50) no
@@ -6153,6 +6185,38 @@ mod tests {
         assert!(!fs.is_file(Path::new("/repo/.superzed/mail/state.json")).await);
         assert!(canvas.read_with(cx, |c, _| c.last_claude_command().is_none()), "nessuna chat senza inbox");
         assert!(canvas.read_with(cx, |c, _| c.last_warning.clone()).is_some_and(|w| w.starts_with("Mail prompt:")));
+    }
+
+    // il prompt della posta compare con il nodo Posta anche non configurato; un file del
+    // progetto con lo stesso nome lo sostituisce
+    #[gpui::test]
+    async fn the_mail_prompt_is_listed_with_the_mail_node_and_a_project_file_replaces_it(cx: &mut TestAppContext) {
+        let (workspace, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        fs.insert_tree("/data/prompts", json!({})).await;
+        cx.update(|_, cx| {
+            cx.set_global(crate::prompt_picker::PromptLibraryDirs { global: PathBuf::from("/data/prompts") });
+            menu::init();
+            cx.bind_keys([gpui::KeyBinding::new("escape", menu::Cancel, None)]);
+        });
+        assert!(canvas.read_with(cx, |c, _| c.mail_view()).is_some_and(|view| view.read_with(cx, |v, _| v.settings().0.is_empty())));
+        canvas.update_in(cx, |c, window, cx| window.focus(&c.focus_handle, cx));
+        cx.dispatch_action(superzed_actions::NewClaudeNodeFromPrompt);
+        cx.run_until_parked();
+        let modal = workspace
+            .read_with(cx, |ws, cx| ws.active_modal::<crate::prompt_picker::PromptPickerModal>(cx))
+            .expect("picker aperto con il solo prompt integrato");
+        assert_eq!(modal.read_with(cx, |m, _| m.selected_name().to_string()), crate::prompt_picker::MAIL_PROMPT_NAME);
+        assert!(cx.debug_bounds("superzed-prompt-row-built-in-Email del progetto").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        fs.insert_tree("/repo/.superzed/prompts", json!({ "posta.md": "---\nname: Email del progetto\n---\nCorpo locale" })).await;
+        canvas.update_in(cx, |c, window, cx| window.focus(&c.focus_handle, cx));
+        cx.dispatch_action(superzed_actions::NewClaudeNodeFromPrompt);
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |ws, cx| ws.active_modal::<crate::prompt_picker::PromptPickerModal>(cx)).is_some());
+        assert!(cx.debug_bounds("superzed-prompt-row-project-Email del progetto").is_some());
+        assert!(cx.debug_bounds("superzed-prompt-row-built-in-Email del progetto").is_none());
     }
 
     #[gpui::test]
