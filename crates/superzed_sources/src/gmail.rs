@@ -268,6 +268,29 @@ impl GmailClient {
     pub async fn mark_thread_read(&self, thread_id: &str) -> Result<(), String> {
         self.run(false, &["gmail", "thread", "modify", thread_id, "--remove", "UNREAD"], None).await.map(|_| ())
     }
+
+    pub async fn drafts(&self) -> Result<Vec<Draft>, String> {
+        parse_drafts(&self.run(true, &["gmail", "drafts", "list", "--max", "100"], None).await?)
+    }
+
+    pub async fn draft_body(&self, draft: &Draft) -> Result<String, String> {
+        parse_message_body(&self.run(true, &["gmail", "get", &draft.message_id], None).await?)
+    }
+
+    /// `--thread-id`: gog rifiuta un update senza oggetto, thread o messaggio a cui rispondere.
+    pub async fn update_draft(&self, draft: &Draft, body: &str) -> Result<(), String> {
+        self.run(
+            false,
+            &["gmail", "drafts", "update", &draft.id, "--thread-id", &draft.thread_id, "--body-file", "-"],
+            Some(body.to_string()),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn send_draft(&self, draft_id: &str) -> Result<(), String> {
+        self.run(false, &["gmail", "drafts", "send", draft_id], None).await.map(|_| ())
+    }
 }
 
 pub const MAIL_DIR: &str = ".superzed/mail";
@@ -452,6 +475,24 @@ mod tests {
         runner.on("gmail thread modify t-200", ok(r#"{"modified":"t-200","removedLabels":["UNREAD"]}"#));
         futures::executor::block_on(client(&runner).mark_thread_read("t-200")).unwrap();
         assert!(runner.calls().last().unwrap().line().ends_with("gmail thread modify t-200 --remove UNREAD"));
+    }
+
+    #[test]
+    fn draft_commands_and_update_keeps_the_thread() {
+        let runner = gmail_runner();
+        let c = client(&runner);
+        let drafts = futures::executor::block_on(c.drafts()).unwrap();
+        assert!(runner.calls().last().unwrap().line().contains("--readonly gmail drafts list --max 100"));
+        runner.on("gmail get m-900", ok(r#"{"body":"Bozza di Claude\n"}"#));
+        assert_eq!(futures::executor::block_on(c.draft_body(&drafts[0])).unwrap(), "Bozza di Claude\n");
+        runner.on("gmail drafts update r-1", ok("{}"));
+        futures::executor::block_on(c.update_draft(&drafts[0], "Bozza rivista")).unwrap();
+        let call = runner.calls().last().cloned().unwrap();
+        assert!(call.line().ends_with("gmail drafts update r-1 --thread-id t-200 --body-file -"));
+        assert_eq!(call.stdin.as_deref(), Some("Bozza rivista"));
+        runner.on("gmail drafts send r-1", ok(r#"{"messageId":"m-901","threadId":"t-200"}"#));
+        futures::executor::block_on(c.send_draft("r-1")).unwrap();
+        assert!(!runner.calls().last().unwrap().line().contains("--readonly"));
     }
 
     #[test]

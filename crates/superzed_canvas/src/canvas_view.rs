@@ -1333,6 +1333,9 @@ impl CanvasView {
             crate::mail_node::MailPanelEvent::OpenChat { prompt } => {
                 this.new_claude_in_kanban_without_send(prompt.clone(), window, cx);
             }
+            crate::mail_node::MailPanelEvent::PrepareDraft { prompt } => {
+                this.new_claude_in_kanban_without_send(prompt.clone(), window, cx);
+            }
         });
         self.node_subscriptions.insert(id, subscription);
     }

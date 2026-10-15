@@ -214,6 +214,18 @@ pub const GOG_DRAFTS: &str = r#"{"count": 1, "drafts": [{"id": "r-1", "messageId
 /// Errore JSON di gog per un account senza token (exit 4).
 pub const GOG_AUTH_ERROR: &str = r#"{"error":{"code":4,"message":"No auth for gmail j.doe@example.com.","class":"auth_required"}}"#;
 
+/// `gog` finto per l'account `j.doe@example.com`.
+pub fn gmail_runner() -> Arc<FakeRunner> {
+    let r = FakeRunner::new();
+    r.on("gog --version", ok(GOG_VERSION));
+    r.on("gmail search", ok(GOG_SEARCH));
+    r.on("gmail thread get t-200", ok(GOG_THREAD));
+    r.on("gmail get m-201", ok(GOG_MESSAGE_1));
+    r.on("gmail get m-202", ok(GOG_MESSAGE_2));
+    r.on("gmail drafts list", ok(GOG_DRAFTS));
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,16 +245,4 @@ mod tests {
         assert_eq!(r.count("issue"), 2);
         assert_eq!(r.calls()[0].stdin.as_deref(), Some("in"));
     }
-}
-
-/// `gog` finto per l'account `j.doe@example.com`.
-pub fn gmail_runner() -> Arc<FakeRunner> {
-    let r = FakeRunner::new();
-    r.on("gog --version", ok(GOG_VERSION));
-    r.on("gmail search", ok(GOG_SEARCH));
-    r.on("gmail thread get t-200", ok(GOG_THREAD));
-    r.on("gmail get m-201", ok(GOG_MESSAGE_1));
-    r.on("gmail get m-202", ok(GOG_MESSAGE_2));
-    r.on("gmail drafts list", ok(GOG_DRAFTS));
-    r
 }
