@@ -292,8 +292,16 @@ pub fn truncate_bodies(thread: &mut MailThread, max_chars: usize) {
     }
 }
 
-pub fn inbox_json(account: &str, query: &str, since: &str, threads: &[MailThread]) -> String {
-    serde_json::to_string_pretty(&serde_json::json!({"account": account, "query": query, "since": since, "threads": threads}))
+/// La ricerca restituisce i thread piu' recenti: arrivato al tetto, quelli piu' vecchi dopo
+/// `since` restano fuori (e l'ultimo controllo avanza comunque).
+pub fn inbox_truncated(found: usize) -> bool {
+    found >= INBOX_MAX_THREADS
+}
+
+pub fn inbox_json(account: &str, query: &str, since: &str, truncated: bool, threads: &[MailThread]) -> String {
+    serde_json::to_string_pretty(
+        &serde_json::json!({"account": account, "query": query, "since": since, "truncated": truncated, "threads": threads}),
+    )
         .unwrap_or_else(|error| format!("{{\"error\": \"{error}\"}}"))
 }
 
@@ -451,11 +459,20 @@ mod tests {
         thread.messages[0].body = "x".repeat(50);
         truncate_bodies(&mut thread, 10);
         assert_eq!(thread.messages[0].body.chars().count(), 10 + "… (troncato)".chars().count());
-        let text = inbox_json("j.doe@example.com", "(from:@acme.example)", "after:1", &[thread]);
+        let text = inbox_json("j.doe@example.com", "(from:@acme.example)", "after:1", false, &[thread.clone()]);
         let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["truncated"], false);
+        let truncated: Value = serde_json::from_str(&inbox_json("a", "q", "after:1", true, &[thread])).unwrap();
+        assert_eq!(truncated["truncated"], true);
         assert_eq!(value["account"], "j.doe@example.com");
         assert_eq!(value["threads"][0]["thread_id"], "t-200");
         assert_eq!(value["threads"][0]["messages"][1]["message_id"], "m-202");
         assert!(value["threads"][0]["messages"][0].get("unread").is_none());
+    }
+
+    #[test]
+    fn the_inbox_is_truncated_from_the_thread_cap() {
+        assert!(!inbox_truncated(INBOX_MAX_THREADS - 1));
+        assert!(inbox_truncated(INBOX_MAX_THREADS));
     }
 }

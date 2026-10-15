@@ -748,8 +748,8 @@ impl CanvasView {
         cx: &mut Context<Self>,
     ) {
         use superzed_sources::gmail::{
-            INBOX_FILE, INBOX_MAX_THREADS, MAIL_DIR, STATE_FILE, inbox_json, parse_last_check, since_query, state_json,
-            truncate_bodies,
+            INBOX_FILE, INBOX_MAX_THREADS, MAIL_DIR, STATE_FILE, inbox_json, inbox_truncated, parse_last_check, since_query,
+            state_json, truncate_bodies,
         };
         let settings = self.mail_view().map(|view| view.read(cx).settings());
         let Some((account, query)) = settings.filter(|(account, query)| !account.trim().is_empty() && !query.trim().is_empty())
@@ -764,7 +764,7 @@ impl CanvasView {
         let client = superzed_sources::GmailClient::new(Self::mail_runner(cx), account.trim());
         let now = chrono::Utc::now();
         cx.spawn_in(window, async move |this, cx| {
-            let result: Result<PathBuf, String> = async {
+            let result: Result<(PathBuf, bool), String> = async {
                 let dir = root.join(MAIL_DIR);
                 let state_path = dir.join(STATE_FILE);
                 let last_check = fs.load(&state_path).await.ok().and_then(|text| parse_last_check(&text));
@@ -772,6 +772,7 @@ impl CanvasView {
                 let base = superzed_sources::project_query(&query, "").unwrap_or_default();
                 let full_query = format!("{base} {since}");
                 let summaries = client.search(&full_query, INBOX_MAX_THREADS).await?;
+                let truncated = inbox_truncated(summaries.len());
                 let mut threads = Vec::new();
                 for summary in summaries {
                     let mut thread = client.thread(&summary.id, true).await?;
@@ -786,21 +787,29 @@ impl CanvasView {
                         .map_err(|error| format!("{}: {error}", ignore.display()))?;
                 }
                 let inbox = dir.join(INBOX_FILE);
-                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, &threads))
+                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, truncated, &threads))
                     .await
                     .map_err(|error| format!("{}: {error}", inbox.display()))?;
                 fs.atomic_write(state_path.clone(), state_json(now))
                     .await
                     .map_err(|error| format!("{}: {error}", state_path.display()))?;
-                Ok(inbox)
+                Ok((inbox, truncated))
             }
             .await;
             this.update_in(cx, |this, window, cx| match result {
-                Ok(inbox) => {
+                Ok((inbox, truncated)) => {
                     placeholders.mail_file = Some(inbox);
                     let prompt = crate::prompt_picker::full_prompt(&body, &placeholders, board_writes_auto);
                     this.next_claude_exports = no_send_exports();
                     this.new_claude_from_prompt(prompt, in_kanban, window, cx);
+                    if truncated {
+                        this.warn(
+                            format!(
+                                "Mail prompt: more than {INBOX_MAX_THREADS} new threads, the oldest were left out — narrow the project query in the mail node"
+                            ),
+                            cx,
+                        );
+                    }
                 }
                 Err(message) => this.warn(format!("Mail prompt: {message}"), cx),
             })
@@ -6116,6 +6125,7 @@ mod tests {
         open_mail_prompt_for_test(&canvas, cx);
         let inbox = fs.load(Path::new("/repo/.superzed/mail/inbox.json")).await.unwrap();
         assert!(inbox.contains("\"thread_id\": \"t-200\""), "{inbox}");
+        assert!(inbox.contains("\"truncated\": false"), "{inbox}");
         assert!(fs.load(Path::new("/repo/.superzed/mail/state.json")).await.unwrap().contains("last_check"));
         assert_eq!(fs.load(Path::new("/repo/.superzed/mail/.gitignore")).await.unwrap(), "*\n");
         let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
