@@ -64,6 +64,18 @@ pub fn claude_node_spec(shell: &str, cwd: Option<PathBuf>, launch: &ClaudeLaunch
     spec
 }
 
+/// Variabili esportate nello script, non nell'ambiente del processo: la shell di login
+/// rilegge il profilo dell'utente, che potrebbe ridefinirle.
+pub fn prepend_exports(spec: &mut SpawnInTerminal, exports: &[(String, String)]) {
+    if exports.is_empty() {
+        return;
+    }
+    let prefix: String = exports.iter().map(|(name, value)| format!("export {name}={}; ", shell_quote(value))).collect();
+    if let Some(script) = spec.args.get_mut(2) {
+        script.insert_str(0, &prefix);
+    }
+}
+
 /// Titolo che claude da' al terminale (OSC), senza il simbolo di stato davanti
 /// (`✳` a riposo, la rotellina braille mentre lavora). `None` se non resta niente.
 pub fn claude_title(osc: &str) -> Option<String> {
@@ -185,6 +197,17 @@ mod tests {
         assert_eq!(login_shell_from(Some("/opt/homebrew/bin/fish".into())), "/opt/homebrew/bin/fish");
         assert_eq!(login_shell_from(Some(String::new())), "/bin/zsh");
         assert_eq!(login_shell_from(None), "/bin/zsh");
+    }
+
+    #[test]
+    fn exports_go_before_the_script() {
+        let mut spec = claude_node_spec("/bin/zsh", None, &launch());
+        let before = spec.args[2].clone();
+        prepend_exports(&mut spec, &[("GOG_GMAIL_NO_SEND".into(), "1".into())]);
+        assert_eq!(spec.args[2], format!("export GOG_GMAIL_NO_SEND='1'; {before}"));
+        let unchanged = spec.args[2].clone();
+        prepend_exports(&mut spec, &[]);
+        assert_eq!(spec.args[2], unchanged);
     }
 
     fn launch() -> superzed_sessions::launch::ClaudeLaunch {

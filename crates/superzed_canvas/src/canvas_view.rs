@@ -241,6 +241,8 @@ pub struct CanvasView {
     /// Come `dock_next_claude`: la prossima chat claude nuova nasce in questo punto
     /// (accanto al pannello di una fonte, `open_chat_beside`).
     next_claude_origin: Option<Point<f32>>,
+    /// Variabili d'ambiente per la prossima chat claude nuova (consumate da `open_new_claude`).
+    next_claude_exports: Vec<(String, String)>,
     /// Connessioni della vista Fonti usate dal progetto (project.json → `sources`).
     project_sources: Vec<String>,
     /// Spunte cambiate mentre project.json si caricava: `apply_file` sostituisce la lista,
@@ -335,6 +337,7 @@ impl CanvasView {
             done_pipeline: Default::default(),
             next_claude_automation: None,
             next_claude_origin: None,
+            next_claude_exports: Vec::new(),
             project_sources: Vec::new(),
             pending_source_changes: Vec::new(),
             foreign_nodes: Vec::new(),
@@ -784,7 +787,8 @@ impl CanvasView {
         let saved = superzed_sessions::SavedSession::default();
         let key = uuid::Uuid::new_v4().to_string();
         let account = self.account_for_new_chat(cx);
-        let (spec, init) = self.claude_spec_for(&account, &saved, &key, initial_prompt, cx);
+        let (mut spec, init) = self.claude_spec_for(&account, &saved, &key, initial_prompt, cx);
+        terminal_node::prepend_exports(&mut spec, &std::mem::take(&mut self.next_claude_exports));
         let spec = self.claude_pty(spec, cx);
         self.open_claude_terminal(None, None, spec, init, window, cx);
         key
@@ -1245,7 +1249,7 @@ impl CanvasView {
         let subscription = cx.subscribe_in(view, window, |this, _, event: &crate::mail_node::MailPanelEvent, window, cx| match event {
             crate::mail_node::MailPanelEvent::SettingsChanged => this.schedule_save(cx),
             crate::mail_node::MailPanelEvent::OpenChat { prompt } => {
-                this.new_claude_in_kanban_with_prompt(Some(prompt.clone()), window, cx);
+                this.new_claude_in_kanban_without_send(prompt.clone(), window, cx);
             }
         });
         self.node_subscriptions.insert(id, subscription);
@@ -1594,6 +1598,13 @@ impl CanvasView {
     /// Chat nuova nel kanban in Nuove, con un prompt iniziale (Risolvi di una notifica).
     /// Restituisce la chiave di sessione della chat: il suo nodo, quando c'e', lo trova
     /// `node_for_session_key`.
+    /// Chat nel kanban che con gog puo' leggere e creare bozze ma non inviare: l'invio e'
+    /// solo il clic nel nodo Posta.
+    pub fn new_claude_in_kanban_without_send(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) -> String {
+        self.next_claude_exports = no_send_exports();
+        self.new_claude_in_kanban_with_prompt(Some(prompt), window, cx)
+    }
+
     pub fn new_claude_in_kanban_with_prompt(&mut self, prompt: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> String {
         if self.kanban_node().is_none() {
             self.open_kanban(window, cx);
@@ -3735,6 +3746,10 @@ impl Render for CanvasView {
 
 /// Titoli di default salvati prima dell'interfaccia in inglese: si mostrano in inglese
 /// (un titolo scelto dall'utente resta com'e').
+pub(crate) fn no_send_exports() -> Vec<(String, String)> {
+    vec![(superzed_sources::gmail::NO_SEND_ENV.to_string(), "1".to_string())]
+}
+
 fn legacy_title(kind: NodeKind, title: &str) -> &str {
     match (kind, title) {
         (NodeKind::Note, "nota") => "note",
@@ -4005,6 +4020,27 @@ mod tests {
             assert!(c.model().frame(other).is_none());
         });
         assert!(closed.get());
+    }
+
+    #[gpui::test]
+    async fn a_chat_opened_from_the_mail_cannot_send(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        canvas.update_in(cx, |c, window, cx| {
+            c.test_claude_pty = Some(zsh_spec());
+            c.new_claude_in_kanban_without_send("Leggi questo thread".into(), window, cx);
+        });
+        cx.run_until_parked();
+        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
+        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
+        canvas.update_in(cx, |c, window, cx| {
+            c.new_claude_in_kanban_with_prompt(Some("altro".into()), window, cx);
+        });
+        cx.run_until_parked();
+        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
+        assert!(!command.contains("GOG_GMAIL_NO_SEND"), "{command}");
+        close_all(&canvas, cx);
     }
 
     #[gpui::test]
