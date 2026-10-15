@@ -83,7 +83,7 @@ const NOTE_MIN_SIZE: (f32, f32) = (120., 80.);
 /// agganciate (quelle agganciate prendono la dimensione dal contenitore, che ha la sua).
 fn free_resizable(frame: &NodeFrame) -> bool {
     match frame.kind {
-        NodeKind::Note => true,
+        NodeKind::Note | NodeKind::Mail => true,
         NodeKind::Shell | NodeKind::Claude | NodeKind::Source => frame.dock.is_none(),
         NodeKind::Kanban | NodeKind::Automations => false,
     }
@@ -203,6 +203,7 @@ pub struct CanvasView {
     /// Ultimo stato per progetto visto sul workspace (per salvare solo se cambia).
     last_state: Option<SuperzedProjectState>,
     node_subscriptions: HashMap<NodeId, Subscription>,
+    mail_views: HashMap<NodeId, Entity<crate::mail_node::MailPanelView>>,
     last_warning: Option<String>,
     /// Nodi terminale, in aggiunta a `contents` (che li vede solo come `dyn NodeContent`).
     terminals: HashMap<NodeId, (Entity<TerminalView>, Entity<Terminal>)>,
@@ -319,6 +320,7 @@ impl CanvasView {
             persist: None,
             last_state: None,
             node_subscriptions: HashMap::default(),
+            mail_views: HashMap::default(),
             last_warning: None,
             terminals: HashMap::default(),
             sessions: HashMap::default(),
@@ -549,6 +551,7 @@ impl CanvasView {
                 content.on_close(cx);
             }
             self.node_subscriptions.remove(id);
+            self.mail_views.remove(id);
             self.terminals.remove(id);
             self.pending_sessions.remove(id);
             self.starting_terminals.remove(id);
@@ -1180,6 +1183,72 @@ impl CanvasView {
         self.watch_source(id, &view, window, cx);
         self.focus_node(id, window, cx);
         id
+    }
+
+    pub fn mail_runner(cx: &App) -> Arc<dyn superzed_sources::Runner> {
+        superzed_sources::ConnectionStore::global(cx)
+            .map(|store| store.read(cx).runner())
+            .unwrap_or_else(|| Arc::new(superzed_sources::ProcessRunner))
+    }
+
+    pub fn mail_node(&self) -> Option<NodeId> {
+        self.model.frames().iter().find(|f| f.kind == NodeKind::Mail).map(|f| f.id)
+    }
+
+    pub fn mail_view(&self) -> Option<Entity<crate::mail_node::MailPanelView>> {
+        let id = self.mail_node()?;
+        self.mail_views.get(&id).cloned()
+    }
+
+    fn new_mail_view(
+        &mut self,
+        data: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::mail_node::MailPanelView> {
+        let (account, query) = crate::mail_node::mail_data(data);
+        let runner = Self::mail_runner(cx);
+        cx.new(|cx| crate::mail_node::MailPanelView::new(account, query, runner, window, cx))
+    }
+
+    /// Il nodo Posta del progetto, creato se manca: a destra del kanban (sotto le
+    /// Automazioni crescerebbe sopra di lui quando se ne aggiungono). Come i contenitori,
+    /// nasce prima di `loaded` e da solo non scrive project.json.
+    pub fn ensure_mail_node(&mut self, window: &mut Window, cx: &mut Context<Self>) -> NodeId {
+        if let Some(id) = self.mail_node() {
+            return id;
+        }
+        let visible = self.viewport.to_canvas(point(0., 0.));
+        let origin = self
+            .kanban_node()
+            .and_then(|kanban| self.model.frame(kanban))
+            .map(|f| point(f.origin.x + f.size.width + automations_layout::CONTAINER_GAP, f.origin.y))
+            .unwrap_or(visible);
+        let view = self.new_mail_view(&serde_json::Value::Null, window, cx);
+        let (width, height) = crate::mail_node::MAIL_SIZE;
+        let id = self.model.add(NodeKind::Mail, origin, size(width, height), crate::mail_node::MAIL_TITLE);
+        self.contents.insert(id, Box::new(crate::mail_node::MailNode::new(view.clone())));
+        self.apply_font_zoom(id, cx);
+        self.watch_mail(id, &view, window, cx);
+        cx.notify();
+        id
+    }
+
+    fn watch_mail(
+        &mut self,
+        id: NodeId,
+        view: &Entity<crate::mail_node::MailPanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mail_views.insert(id, view.clone());
+        let subscription = cx.subscribe_in(view, window, |this, _, event: &crate::mail_node::MailPanelEvent, window, cx| match event {
+            crate::mail_node::MailPanelEvent::SettingsChanged => this.schedule_save(cx),
+            crate::mail_node::MailPanelEvent::OpenChat { prompt } => {
+                this.new_claude_in_kanban_with_prompt(Some(prompt.clone()), window, cx);
+            }
+        });
+        self.node_subscriptions.insert(id, subscription);
     }
 
     /// Eventi del pannello: filtro cambiato → salvataggio; "Apri chat" → chat accanto al
@@ -2174,6 +2243,11 @@ impl CanvasView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // il nodo Posta e' fisso: chiuderlo toglierebbe la posta al progetto
+        let ids: Vec<NodeId> = ids
+            .into_iter()
+            .filter(|id| self.model.frame(*id).is_none_or(|f| f.kind != NodeKind::Mail))
+            .collect();
         if ids.is_empty() {
             return;
         }
@@ -2699,6 +2773,7 @@ impl CanvasView {
         let github = self.is_done_chat(NodeId(id), cx);
         let menu_keys = self.menu_keys.clone();
         let golden = frame.golden;
+        let closable = frame.kind != NodeKind::Mail;
         let title = ui::right_click_menu(("superzed-node-menu", id))
             .trigger(move |_, _, _| head)
             .menu(move |window, cx| {
@@ -2723,7 +2798,7 @@ impl CanvasView {
                         });
                     }
                     let (c1, c2, c3, c4) = (canvas.clone(), canvas.clone(), canvas.clone(), canvas.clone());
-                    menu.item(
+                    let menu = menu.item(
                         ui::ContextMenuEntry::new("Rename")
                             .icon(ui::IconName::Pencil)
                             .action(Box::new(superzed_actions::RenameNode))
@@ -2746,9 +2821,11 @@ impl CanvasView {
                             .handler(move |_, cx| {
                                 c4.update(cx, |c, cx| c.toggle_golden(&[NodeId(id)], cx)).ok();
                             }),
-                    )
-                    .separator()
-                    .item(
+                    );
+                    if !closable {
+                        return menu;
+                    }
+                    menu.separator().item(
                         ui::ContextMenuEntry::new("Close")
                             .icon(ui::IconName::Close)
                             .action(Box::new(superzed_actions::CloseNode))
@@ -3171,6 +3248,7 @@ impl CanvasView {
         if cx.try_global::<DefaultContainers>().map_or(true, |d| d.0) {
             self.ensure_container(DockKind::Kanban, cx);
             self.ensure_container(DockKind::Automations, cx);
+            self.ensure_mail_node(window, cx);
         }
         for (id, used) in std::mem::take(&mut self.pending_source_changes) {
             toggle_source(&mut self.project_sources, &id, used);
@@ -3263,6 +3341,9 @@ impl CanvasView {
         if let Some(runtime) = self.automations.remove(&old) {
             self.automations.insert(new, runtime);
         }
+        if let Some(view) = self.mail_views.remove(&old) {
+            self.mail_views.insert(new, view);
+        }
         let subscription = self.node_subscriptions.remove(&old);
         match self.terminals.remove(&old) {
             Some((view, terminal)) => {
@@ -3333,6 +3414,11 @@ impl CanvasView {
                 let view = cx.new(|cx| SourcePanelView::new(connection, filter, root, window, cx));
                 self.watch_source(frame.id, &view, window, cx);
                 self.insert_restored_node(frame, Box::new(SourceNode::new(view)), cx);
+            }
+            NodeKind::Mail => {
+                let view = self.new_mail_view(data, window, cx);
+                self.watch_mail(frame.id, &view, window, cx);
+                self.insert_restored_node(frame, Box::new(crate::mail_node::MailNode::new(view)), cx);
             }
             NodeKind::Kanban | NodeKind::Automations => {
                 let kind = if frame.kind == NodeKind::Kanban { DockKind::Kanban } else { DockKind::Automations };
@@ -4961,6 +5047,71 @@ mod tests {
             assert_eq!(c.model().frames().iter().filter(|f| f.kind == NodeKind::Kanban).count(), 1);
             assert!(c.container_node(DockKind::Automations).is_some(), "le Automazioni chiuse tornano");
         });
+    }
+
+    #[gpui::test]
+    async fn the_mail_node_exists_once_and_survives_close(cx: &mut TestAppContext) {
+        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        let mail = canvas.read_with(cx, |c, _| c.mail_node()).expect("nodo Posta creato al caricamento");
+        let again = canvas.update_in(cx, |c, window, cx| c.ensure_mail_node(window, cx));
+        assert_eq!(mail, again);
+        let note = canvas.update_in(cx, |c, window, cx| c.new_note(window, cx));
+        // selezione di tutto + chiusura: la nota va, il nodo Posta resta
+        canvas.update_in(cx, |c, window, cx| {
+            c.model.select(note, false);
+            c.model.select(mail, true);
+            let targets = c.target_nodes(window, cx);
+            c.close_nodes_with_confirm(targets, window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        canvas.read_with(cx, |c, _| {
+            assert!(c.model.frame(note).is_none(), "la nota si chiude");
+            assert!(c.model.frame(mail).is_some(), "il nodo Posta resta");
+        });
+    }
+
+    #[gpui::test]
+    async fn closing_only_the_mail_node_asks_nothing(cx: &mut TestAppContext) {
+        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        let mail = canvas.read_with(cx, |c, _| c.mail_node()).unwrap();
+        canvas.update_in(cx, |c, window, cx| c.close_nodes_with_confirm(vec![mail], window, cx));
+        cx.run_until_parked();
+        assert!(canvas.read_with(cx, |c, _| c.model.frame(mail).is_some()));
+    }
+
+    #[gpui::test]
+    async fn mail_settings_are_saved_and_restored(cx: &mut TestAppContext) {
+        // gog finto: senza ConnectionStore il nodo userebbe il gog vero
+        let (_store, _dir) = with_sources(cx, superzed_sources::test_support::gmail_runner(), github_connections());
+        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.account_editor().update(cx, |e, cx| e.set_text("j.doe@example.com", window, cx));
+            v.query_editor().update(cx, |e, cx| e.set_text("from:@acme.example", window, cx));
+            v.apply_settings(cx);
+        });
+        cx.executor().advance_clock(SAVE_DEBOUNCE);
+        cx.run_until_parked();
+        let saved = parse_project_file(&fs.load(Path::new("/repo/.superzed/project.json")).await.unwrap()).unwrap();
+        let record = saved.nodes.iter().find(|n| n.kind == NodeKind::Mail).expect("nodo Posta salvato");
+        assert_eq!(record.data, json!({"account": "j.doe@example.com", "query": "from:@acme.example"}));
+        // canvas svuotato: le impostazioni possono venire solo dal file
+        canvas.update_in(cx, |c, window, cx| {
+            let all: Vec<NodeId> = c.model.frames().iter().map(|f| f.id).collect();
+            c.remove_nodes(&all, cx);
+            c.persist.as_mut().unwrap().loaded = false;
+            c.finish_load(LoadOutcome::Loaded(saved.clone()), window, cx);
+        });
+        cx.run_until_parked();
+        let mails = canvas.read_with(cx, |c, _| c.model.frames().iter().filter(|f| f.kind == NodeKind::Mail).count());
+        assert_eq!(mails, 1, "il nodo del file, nessun altro");
+        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
+        assert_eq!(view.read_with(cx, |v, _| v.settings()), ("j.doe@example.com".into(), "from:@acme.example".into()));
     }
 
     #[gpui::test]

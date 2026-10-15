@@ -124,6 +124,14 @@ impl MailPanelView {
         view
     }
 
+    pub fn account_editor(&self) -> &Entity<Editor> {
+        &self.account
+    }
+
+    pub fn query_editor(&self) -> &Entity<Editor> {
+        &self.query
+    }
+
     pub fn search_editor(&self) -> &Entity<Editor> {
         &self.search
     }
@@ -160,7 +168,7 @@ impl MailPanelView {
 
     /// Account e query del progetto si applicano con Invio (non a ogni tasto: ogni
     /// modifica sarebbe una ricerca su Gmail).
-    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let account = self.account.read(cx).text(cx).trim().to_string();
         let query = self.query.read(cx).text(cx).trim().to_string();
         if account != self.saved_account || query != self.saved_query {
