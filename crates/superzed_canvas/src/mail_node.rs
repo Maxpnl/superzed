@@ -83,6 +83,7 @@ pub struct MailPanelView {
     /// Account e query della ricerca in corso: solo una richiesta identica viene saltata.
     loading_key: Option<(String, String)>,
     thread_loading: Option<Task<()>>,
+    draft_loading: Option<Task<()>>,
     reply: Entity<Editor>,
     reply_all: bool,
     /// Primo clic su «Send…»: si mostrano i destinatari e si invia solo con «Send now».
@@ -140,6 +141,7 @@ impl MailPanelView {
             loading: None,
             loading_key: None,
             thread_loading: None,
+            draft_loading: None,
             reply,
             reply_all: false,
             confirm_send: false,
@@ -250,11 +252,13 @@ impl MailPanelView {
                     client.check_version().await?;
                 }
                 let threads = client.search(&query, SEARCH_MAX).await?;
-                // senza le bozze la posta resta leggibile: l'errore va solo nel log
-                let drafts = client.drafts().await.unwrap_or_else(|error| {
-                    log::info!("gmail: bozze non lette: {error}");
-                    Vec::new()
-                });
+                // senza le bozze la posta resta leggibile: l'errore va solo nel log e restano
+                // quelle di prima (una lista vuota scaricherebbe la bozza aperta)
+                let drafts = client
+                    .drafts()
+                    .await
+                    .map_err(|error| log::info!("gmail: bozze non lette: {error}"))
+                    .ok();
                 Ok((threads, drafts))
             }
             .await;
@@ -263,9 +267,16 @@ impl MailPanelView {
                     Ok((threads, drafts)) => {
                         v.version_checked = true;
                         v.threads = threads;
-                        v.drafts = drafts;
                         v.status = MailStatus::Idle;
                         v.refreshed_at = Some(Local::now());
+                        if let Some(drafts) = drafts {
+                            v.drafts = drafts;
+                            // una bozza appena scritta da Claude compare nel thread aperto; una
+                            // gia' caricata non si tocca, per non perdere le modifiche
+                            if v.loaded_draft.is_none() {
+                                v.sync_draft(cx);
+                            }
+                        }
                     }
                     Err(message) => v.status = MailStatus::Error(message),
                 }
@@ -275,6 +286,14 @@ impl MailPanelView {
             })
             .ok();
         }));
+    }
+
+    /// Dopo un invio la lista va riletta: una ricerca uguale gia' in corso porterebbe le
+    /// bozze di prima, compresa quella appena inviata.
+    fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.loading = None;
+        self.loading_key = None;
+        self.refresh(cx);
     }
 
     pub fn select(&mut self, id: String, cx: &mut Context<Self>) {
@@ -287,29 +306,14 @@ impl MailPanelView {
             self.thread = None;
             self.confirm_send = false;
             self.loaded_draft = None;
+            self.draft_loading = None;
             self.clear_reply(cx);
         }
         self.selected = Some(id.clone());
-        let draft = self.drafts.iter().find(|draft| draft.thread_id == id).cloned();
-        // riaprire lo stesso thread non sostituisce le modifiche gia' fatte alla bozza
-        let keep_loaded = draft
-            .as_ref()
-            .is_some_and(|draft| self.loaded_draft.as_ref().is_some_and(|(loaded, _)| loaded.id == draft.id));
-        let draft = draft.filter(|_| !keep_loaded);
         cx.notify();
         // il task precedente si scarta: una risposta vecchia non sovrascrive la selezione nuova
         self.thread_loading = Some(cx.spawn(async move |this, cx| {
             let result = client.readable_thread(&id).await;
-            let draft = match draft {
-                Some(draft) if result.is_ok() => match client.draft_body(&draft).await {
-                    Ok(body) => Some((draft, body)),
-                    Err(error) => {
-                        log::info!("gmail: bozza {} non letta: {error}", draft.id);
-                        None
-                    }
-                },
-                _ => None,
-            };
             this.update(cx, |v, cx| {
                 if v.selected.as_deref() != Some(id.as_str()) {
                     return;
@@ -320,9 +324,7 @@ impl MailPanelView {
                             v.mark_read(client, &id, cx);
                         }
                         v.thread = Some(thread);
-                        if !keep_loaded {
-                            v.show_draft(draft, cx);
-                        }
+                        v.sync_draft(cx);
                     }
                     Err(message) => v.status = MailStatus::Error(message),
                 }
@@ -346,17 +348,55 @@ impl MailPanelView {
         .detach();
     }
 
-    fn show_draft(&mut self, draft: Option<(Draft, String)>, cx: &mut Context<Self>) {
-        let Some((draft, body)) = draft else {
-            if self.loaded_draft.take().is_some() {
-                self.confirm_send = false;
-                self.clear_reply(cx);
-            }
+    /// Porta nell'editor la bozza del thread mostrato. Una bozza gia' caricata e ancora in
+    /// lista resta com'e' (con le modifiche); il testo scritto a mano non viene sostituito.
+    fn sync_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.thread.as_ref().map(|thread| thread.id.clone()) else {
             return;
         };
-        self.confirm_send = false;
-        self.set_reply_text(&body, cx);
-        self.loaded_draft = Some((draft, body));
+        let draft = self.drafts.iter().find(|draft| draft.thread_id == thread_id).cloned();
+        if let Some((loaded, _)) = &self.loaded_draft {
+            if draft.as_ref().is_some_and(|draft| draft.id == loaded.id) {
+                return;
+            }
+            // bozza sparita (inviata o cancellata su Gmail): il suo testo non deve partire
+            // come una risposta in piu'
+            self.loaded_draft = None;
+            self.confirm_send = false;
+            self.clear_reply(cx);
+        }
+        let Some(draft) = draft else {
+            return;
+        };
+        if self.draft_loading.is_some() || !self.reply.read(cx).text(cx).trim().is_empty() {
+            return;
+        }
+        let Some(client) = self.client() else {
+            return;
+        };
+        self.draft_loading = Some(cx.spawn(async move |this, cx| {
+            let body = client.draft_body(&draft).await;
+            this.update(cx, |v, cx| {
+                v.draft_loading = None;
+                let body = match body {
+                    Ok(body) => body,
+                    Err(error) => {
+                        log::info!("gmail: bozza {} non letta: {error}", draft.id);
+                        return;
+                    }
+                };
+                // nel frattempo si puo' essere cambiato thread o iniziato a scrivere
+                let same_thread = v.thread.as_ref().is_some_and(|thread| thread.id == draft.thread_id);
+                if !same_thread || v.loaded_draft.is_some() || !v.reply.read(cx).text(cx).trim().is_empty() {
+                    return;
+                }
+                v.confirm_send = false;
+                v.set_reply_text(&body, cx);
+                v.loaded_draft = Some((draft, body));
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn clear_reply(&mut self, cx: &mut Context<Self>) {
@@ -461,7 +501,7 @@ impl MailPanelView {
                             if v.loaded_draft.as_ref().is_some_and(|(loaded, _)| loaded.id == sent.id) {
                                 v.loaded_draft = None;
                             }
-                            v.refresh(cx);
+                            v.refresh_now(cx);
                         }
                         if v.selected.as_deref() == Some(thread.id.as_str()) {
                             v.clear_reply(cx);
@@ -996,6 +1036,8 @@ mod tests {
             v.request_send(cx);
         });
         assert_eq!(view.read_with(cx, |v, _| v.send_summary()), Some("Send Claude's draft (to the thread's recipients)".into()));
+        // inviata, Gmail non la elenca piu'
+        runner.on("gmail drafts list", superzed_sources::test_support::ok(r#"{"drafts":[]}"#));
         view.update(cx, |v, cx| v.confirm_send(cx));
         cx.run_until_parked();
         let lines: Vec<String> = runner.calls().iter().map(|call| call.line()).collect();
@@ -1009,6 +1051,64 @@ mod tests {
         assert_eq!(runner.count("gmail reply"), 0);
         assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "");
         assert!(view.read_with(cx, |v, _| v.loaded_draft().is_none()));
+    }
+
+    #[gpui::test]
+    async fn a_draft_written_after_opening_the_thread_appears_on_refresh(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail drafts list", superzed_sources::test_support::ok(r#"{"drafts":[]}"#));
+        runner.on("gmail get m-900", superzed_sources::test_support::ok(r#"{"body":"Bozza di Claude\n"}"#));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "");
+        runner.on("gmail drafts list", superzed_sources::test_support::ok(superzed_sources::test_support::GOG_DRAFTS));
+        view.update(cx, |v, cx| v.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "Bozza di Claude\n");
+        assert_eq!(view.read_with(cx, |v, _| v.loaded_draft().map(|d| d.id.clone())), Some("r-1".into()));
+    }
+
+    #[gpui::test]
+    async fn a_new_draft_does_not_replace_text_the_user_typed(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail drafts list", superzed_sources::test_support::ok(r#"{"drafts":[]}"#));
+        runner.on("gmail get m-900", superzed_sources::test_support::ok(r#"{"body":"Bozza di Claude\n"}"#));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Scritto a mano", window, cx));
+        });
+        runner.on("gmail drafts list", superzed_sources::test_support::ok(superzed_sources::test_support::GOG_DRAFTS));
+        view.update(cx, |v, cx| v.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "Scritto a mano");
+        assert!(view.read_with(cx, |v, _| v.loaded_draft().is_none()));
+        assert_eq!(runner.count("gmail get m-900"), 0);
+    }
+
+    #[gpui::test]
+    async fn a_failed_draft_list_keeps_the_loaded_draft_and_its_edits(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail get m-900", superzed_sources::test_support::ok(r#"{"body":"Bozza di Claude\n"}"#));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Bozza rivista", window, cx));
+        });
+        runner.on("gmail drafts list", superzed_sources::test_support::fail(1, "boom"));
+        view.update(cx, |v, cx| v.refresh(cx));
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.loaded_draft().map(|d| d.id.clone())), Some("r-1".into()));
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "Bozza rivista");
+        assert_eq!(view.read_with(cx, |v, _| v.threads().len()), 2, "la lista dei thread resta");
     }
 
     #[gpui::test]
