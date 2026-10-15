@@ -173,6 +173,47 @@ pub fn github_connections() -> serde_json::Value {
     ]})
 }
 
+/// `gog --version` (build di release).
+pub const GOG_VERSION: &str = "v0.44.0 (cf42bb7 2026-10-11T18:32:54Z)\n";
+
+/// `gog … gmail search --max 50 --json -- '(from:@acme.example) '` (forma di gog 0.44, dati finti).
+pub const GOG_SEARCH: &str = r#"{
+  "count": 2,
+  "has_more": false,
+  "nextPageToken": "",
+  "threads": [
+    {"id": "t-200", "date": "2026-10-14 09:12", "internalDateIso": "2026-10-14T09:12:00+02:00", "from": "Alice <alice@example.com>", "subject": "Policy di annullamento approvata", "labels": ["UNREAD", "INBOX"], "messageCount": 2},
+    {"id": "t-100", "from": "j.doe@example.com", "subject": "Atlas: listini", "messageCount": 1}
+  ]
+}"#;
+
+/// `gog … gmail thread get t-200 --sanitize-content --json`.
+pub const GOG_THREAD: &str = r#"{
+  "downloaded": null,
+  "thread": {
+    "id": "t-200",
+    "messages": [
+      {"id": "m-201", "threadId": "t-200", "labelIds": ["INBOX"], "internalDate": 1760425920000,
+       "headers": {"from": "Alice <alice@example.com>", "to": "j.doe@example.com", "subject": "Policy di annullamento approvata", "date": "Tue, 14 Oct 2026 09:12:00 +0200"},
+       "body": "Ciao, la policy è approvata. Potete procedere con l'annullamento.",
+       "attachments": [{"filename": "policy.pdf", "size": 1200, "sizeHuman": "1.2 KB", "mimeType": "application/pdf"}]},
+      {"id": "m-202", "threadId": "t-200", "labelIds": ["UNREAD", "INBOX"], "internalDate": 1760430000000,
+       "headers": {"from": "Alice <alice@example.com>", "reply_to": "team@example.com", "to": "j.doe@example.com", "cc": "bob@example.com", "subject": "Re: Policy di annullamento approvata", "date": "Tue, 14 Oct 2026 10:20:00 +0200"},
+       "body": "Dimenticavo: vale da lunedì."}
+    ]
+  }
+}"#;
+
+/// `gog … gmail get m-201 --json` (corpo decodificato, a capo conservati).
+pub const GOG_MESSAGE_1: &str = r#"{"message": {"id": "m-201"}, "headers": {"from": "Alice <alice@example.com>"}, "body": "Ciao,\nla policy è approvata.\n\nPotete procedere con l'annullamento.\n", "attachments": []}"#;
+pub const GOG_MESSAGE_2: &str = r#"{"message": {"id": "m-202"}, "headers": {"from": "Alice <alice@example.com>"}, "body": "Dimenticavo:\nvale da lunedì.\n"}"#;
+
+/// `gog … gmail drafts list --json`.
+pub const GOG_DRAFTS: &str = r#"{"count": 1, "drafts": [{"id": "r-1", "messageId": "m-900", "threadId": "t-200"}, {"id": "r-2"}], "has_more": false, "nextPageToken": ""}"#;
+
+/// Errore JSON di gog per un account senza token (exit 4).
+pub const GOG_AUTH_ERROR: &str = r#"{"error":{"code":4,"message":"No auth for gmail j.doe@example.com.","class":"auth_required"}}"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
