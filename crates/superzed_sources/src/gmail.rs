@@ -261,6 +261,42 @@ impl GmailClient {
     }
 }
 
+pub const MAIL_DIR: &str = ".superzed/mail";
+pub const INBOX_FILE: &str = "inbox.json";
+pub const STATE_FILE: &str = "state.json";
+pub const FIRST_WINDOW_DAYS: i64 = 14;
+pub const INBOX_MAX_THREADS: usize = 30;
+const TRUNCATED: &str = "… (troncato)";
+
+/// Gmail accetta `after:` con i secondi unix (piu' preciso del giorno di `newer_than`).
+pub fn since_query(last_check: Option<DateTime<chrono::Utc>>, now: DateTime<chrono::Utc>) -> String {
+    let since = last_check.unwrap_or(now - chrono::Duration::days(FIRST_WINDOW_DAYS));
+    format!("after:{}", since.timestamp())
+}
+
+pub fn parse_last_check(text: &str) -> Option<DateTime<chrono::Utc>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let at = value.get("last_check")?.as_str()?;
+    DateTime::parse_from_rfc3339(at).ok().map(|date| date.with_timezone(&chrono::Utc))
+}
+
+pub fn state_json(now: DateTime<chrono::Utc>) -> String {
+    serde_json::json!({"last_check": now.to_rfc3339()}).to_string()
+}
+
+pub fn truncate_bodies(thread: &mut MailThread, max_chars: usize) {
+    for message in &mut thread.messages {
+        if message.body.chars().count() > max_chars {
+            message.body = message.body.chars().take(max_chars).collect::<String>() + TRUNCATED;
+        }
+    }
+}
+
+pub fn inbox_json(account: &str, query: &str, since: &str, threads: &[MailThread]) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({"account": account, "query": query, "since": since, "threads": threads}))
+        .unwrap_or_else(|error| format!("{{\"error\": \"{error}\"}}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +433,29 @@ mod tests {
         runner.on("gmail search", Ok(RunOutput { success: false, code: Some(4), stdout: GOG_AUTH_ERROR.into(), stderr: String::new() }));
         let err = futures::executor::block_on(client(&runner).search("(x)", 5)).unwrap_err();
         assert_eq!(err, gog_not_authorized("j.doe@example.com"));
+    }
+
+    #[test]
+    fn first_check_looks_back_two_weeks_then_from_the_last_check() {
+        let now = DateTime::parse_from_rfc3339("2026-10-15T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(since_query(None, now), format!("after:{}", now.timestamp() - 14 * 86_400));
+        let last = now - chrono::Duration::hours(3);
+        assert_eq!(since_query(Some(last), now), format!("after:{}", last.timestamp()));
+        assert_eq!(parse_last_check(&state_json(now)), Some(now));
+        assert_eq!(parse_last_check("non json"), None);
+    }
+
+    #[test]
+    fn inbox_lists_threads_with_message_ids_and_truncated_bodies() {
+        let mut thread = parse_thread(GOG_THREAD).unwrap();
+        thread.messages[0].body = "x".repeat(50);
+        truncate_bodies(&mut thread, 10);
+        assert_eq!(thread.messages[0].body.chars().count(), 10 + "… (troncato)".chars().count());
+        let text = inbox_json("j.doe@example.com", "(from:@acme.example)", "after:1", &[thread]);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["account"], "j.doe@example.com");
+        assert_eq!(value["threads"][0]["thread_id"], "t-200");
+        assert_eq!(value["threads"][0]["messages"][1]["message_id"], "m-202");
+        assert!(value["threads"][0]["messages"][0].get("unread").is_none());
     }
 }

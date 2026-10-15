@@ -735,6 +735,79 @@ impl CanvasView {
         }
     }
 
+    /// Prompt che usa `{mail_file}`: prima scrive in `.superzed/mail/inbox.json` i thread
+    /// del filtro arrivati dopo l'ultimo controllo, poi apre la chat (senza invio). L'ultimo
+    /// controllo avanza solo a inbox scritta: un errore non fa perdere email.
+    pub fn open_mail_prompt(
+        &mut self,
+        body: String,
+        board_writes_auto: bool,
+        mut placeholders: crate::prompt_picker::Placeholders,
+        in_kanban: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use superzed_sources::gmail::{
+            INBOX_FILE, INBOX_MAX_THREADS, MAIL_DIR, STATE_FILE, inbox_json, parse_last_check, since_query, state_json,
+            truncate_bodies,
+        };
+        let settings = self.mail_view().map(|view| view.read(cx).settings());
+        let Some((account, query)) = settings.filter(|(account, query)| !account.trim().is_empty() && !query.trim().is_empty())
+        else {
+            self.warn("Set the Gmail account and the project query in the mail node first".to_string(), cx);
+            return;
+        };
+        let Some((fs, root)) = self.project_root(cx) else {
+            self.warn("The mail prompt needs a project folder".to_string(), cx);
+            return;
+        };
+        let client = superzed_sources::GmailClient::new(Self::mail_runner(cx), account.trim());
+        let now = chrono::Utc::now();
+        cx.spawn_in(window, async move |this, cx| {
+            let result: Result<PathBuf, String> = async {
+                let dir = root.join(MAIL_DIR);
+                let state_path = dir.join(STATE_FILE);
+                let last_check = fs.load(&state_path).await.ok().and_then(|text| parse_last_check(&text));
+                let since = since_query(last_check, now);
+                let base = superzed_sources::project_query(&query, "").unwrap_or_default();
+                let full_query = format!("{base} {since}");
+                let summaries = client.search(&full_query, INBOX_MAX_THREADS).await?;
+                let mut threads = Vec::new();
+                for summary in summaries {
+                    let mut thread = client.thread(&summary.id, true).await?;
+                    truncate_bodies(&mut thread, superzed_sources::CONTEXT_MAX_CHARS);
+                    threads.push(thread);
+                }
+                fs.create_dir(&dir).await.map_err(|error| format!("{}: {error}", dir.display()))?;
+                let ignore = dir.join(".gitignore");
+                if !fs.is_file(&ignore).await {
+                    fs.atomic_write(ignore.clone(), "*\n".to_string())
+                        .await
+                        .map_err(|error| format!("{}: {error}", ignore.display()))?;
+                }
+                let inbox = dir.join(INBOX_FILE);
+                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, &threads))
+                    .await
+                    .map_err(|error| format!("{}: {error}", inbox.display()))?;
+                fs.atomic_write(state_path.clone(), state_json(now))
+                    .await
+                    .map_err(|error| format!("{}: {error}", state_path.display()))?;
+                Ok(inbox)
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(inbox) => {
+                    placeholders.mail_file = Some(inbox);
+                    let prompt = crate::prompt_picker::full_prompt(&body, &placeholders, board_writes_auto);
+                    this.next_claude_exports = no_send_exports();
+                    this.new_claude_from_prompt(prompt, in_kanban, window, cx);
+                }
+                Err(message) => this.warn(format!("Mail prompt: {message}"), cx),
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// Crea un nodo terminale (`restored = None`) o ricrea quello salvato.
     /// Il frame ripristinato entra subito nel modello, cosi' un salvataggio fatto
     /// mentre il PTY parte non lo perde; il contenuto arriva quando il terminale e' pronto.
@@ -6003,6 +6076,70 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(canvas.read_with(cx, |c, cx| c.docked_chats(cx).len()), 1);
         close_all(&canvas, cx);
+    }
+
+    fn configure_mail(canvas: &Entity<CanvasView>, cx: &mut VisualTestContext) {
+        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
+        view.update_in(cx, |v, window, cx| {
+            v.account_editor().update(cx, |e, cx| e.set_text("j.doe@example.com", window, cx));
+            v.query_editor().update(cx, |e, cx| e.set_text("from:@acme.example", window, cx));
+            v.apply_settings(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn open_mail_prompt_for_test(canvas: &Entity<CanvasView>, cx: &mut VisualTestContext) {
+        let placeholders =
+            crate::prompt_picker::Placeholders { project_dir: Some("/repo".into()), notifications_dir: "/n".into(), mail_file: None };
+        canvas.update_in(cx, |c, window, cx| {
+            c.test_claude_pty = Some(zsh_spec());
+            c.open_mail_prompt("Leggi {mail_file}".into(), true, placeholders, false, window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn the_mail_prompt_writes_the_inbox_and_opens_a_no_send_chat(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let runner = superzed_sources::test_support::gmail_runner();
+        // il secondo thread della ricerca finta: senza, la sua lettura fallirebbe
+        runner.on(
+            "gmail thread get t-100",
+            superzed_sources::test_support::ok(
+                r#"{"thread":{"id":"t-100","messages":[{"id":"m-101","headers":{"subject":"Atlas: listini"},"body":"x"}]}}"#,
+            ),
+        );
+        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
+        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        configure_mail(&canvas, cx);
+        open_mail_prompt_for_test(&canvas, cx);
+        let inbox = fs.load(Path::new("/repo/.superzed/mail/inbox.json")).await.unwrap();
+        assert!(inbox.contains("\"thread_id\": \"t-200\""), "{inbox}");
+        assert!(fs.load(Path::new("/repo/.superzed/mail/state.json")).await.unwrap().contains("last_check"));
+        assert_eq!(fs.load(Path::new("/repo/.superzed/mail/.gitignore")).await.unwrap(), "*\n");
+        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
+        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
+        assert!(command.contains("/repo/.superzed/mail/inbox.json"), "{command}");
+        // la ricerca del prompt (max 30), non quella del nodo (max 50)
+        let search = runner.calls().into_iter().find(|c| c.line().contains("gmail search --max 30 --")).unwrap();
+        assert!(search.args.last().unwrap().starts_with("(from:@acme.example) after:"));
+        close_all(&canvas, cx);
+    }
+
+    #[gpui::test]
+    async fn a_failed_search_does_not_move_the_last_check(cx: &mut TestAppContext) {
+        let runner = superzed_sources::test_support::gmail_runner();
+        // solo la ricerca del prompt (max 30) fallisce, quella del nodo (max 50) no
+        runner.on("gmail search --max 30 --", superzed_sources::test_support::fail(8, "backend error"));
+        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
+        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        configure_mail(&canvas, cx);
+        open_mail_prompt_for_test(&canvas, cx);
+        assert!(!fs.is_file(Path::new("/repo/.superzed/mail/state.json")).await);
+        assert!(canvas.read_with(cx, |c, _| c.last_claude_command().is_none()), "nessuna chat senza inbox");
+        assert!(canvas.read_with(cx, |c, _| c.last_warning.clone()).is_some_and(|w| w.starts_with("Mail prompt:")));
     }
 
     #[gpui::test]
