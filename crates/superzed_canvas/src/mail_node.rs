@@ -70,6 +70,8 @@ pub struct MailPanelView {
     focus: FocusHandle,
     pub(crate) zoom: f32,
     loading: Option<Task<()>>,
+    /// Account e query della ricerca in corso: solo una richiesta identica viene saltata.
+    loading_key: Option<(String, String)>,
     thread_loading: Option<Task<()>>,
     _ticker: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -113,6 +115,7 @@ impl MailPanelView {
             focus: cx.focus_handle(),
             zoom: 1.,
             loading: None,
+            loading_key: None,
             thread_loading: None,
             _ticker: ticker,
             _subscriptions: Vec::new(),
@@ -173,15 +176,22 @@ impl MailPanelView {
         let search = self.search.read(cx).text(cx);
         let (Some(client), Some(query)) = (self.client(), project_query(&self.saved_query, &search)) else {
             self.loading = None;
+            self.loading_key = None;
             self.threads.clear();
+            self.selected = None;
+            self.thread = None;
+            self.thread_loading = None;
             self.status = MailStatus::NotConfigured;
             cx.notify();
             return;
         };
-        // una ricerca in corso non ne fa partire un'altra
-        if self.loading.is_some() && self.status == MailStatus::Loading {
+        // una ricerca in corso non ne fa partire un'altra uguale; se account o query sono
+        // cambiati, sostituirla annulla quella vecchia, che non sovrascrive piu' le righe
+        let key = (client.account().to_string(), query.clone());
+        if self.loading.is_some() && self.loading_key.as_ref() == Some(&key) {
             return;
         }
+        self.loading_key = Some(key);
         let check_version = !self.version_checked;
         self.status = MailStatus::Loading;
         cx.notify();
@@ -204,6 +214,7 @@ impl MailPanelView {
                     Err(message) => v.status = MailStatus::Error(message),
                 }
                 v.loading = None;
+                v.loading_key = None;
                 cx.notify();
             })
             .ok();
@@ -214,6 +225,11 @@ impl MailPanelView {
         let Some(client) = self.client() else {
             return;
         };
+        // il thread mostrato segue la selezione: «apri chat» non manda il thread di prima
+        // mentre il nuovo si carica o se non si legge
+        if self.selected.as_deref() != Some(id.as_str()) {
+            self.thread = None;
+        }
         self.selected = Some(id.clone());
         cx.notify();
         // il task precedente si scarta: una risposta vecchia non sovrascrive la selezione nuova
@@ -528,6 +544,45 @@ mod tests {
         assert!(prompt.contains("Policy di annullamento approvata"));
         assert!(prompt.contains("vale da lunedì"));
         assert!(prompt.contains(superzed_sources::DATA_START));
+    }
+
+    #[gpui::test]
+    async fn new_settings_replace_a_search_in_flight(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        let got = events(&view, cx);
+        // la prima ricerca resta in sospeso: nessun parcheggio prima del cambio di query
+        view.update_in(cx, |v, window, cx| {
+            v.search_editor().update(cx, |e, cx| e.set_text("policy", window, cx));
+            v.refresh(cx);
+            v.query.update(cx, |e, cx| e.set_text("label:atlas", window, cx));
+            v.apply_settings(cx);
+        });
+        cx.run_until_parked();
+        let searches: Vec<_> = runner.calls().into_iter().filter(|c| c.line().contains("gmail search")).collect();
+        assert_eq!(searches.len(), 2, "la ricerca vecchia e' annullata");
+        assert_eq!(searches.last().and_then(|c| c.args.last()).map(String::as_str), Some("(label:atlas) policy"));
+        assert_eq!(got.borrow().as_slice(), &[MailPanelEvent::SettingsChanged]);
+        assert_eq!(view.read_with(cx, |v, _| v.settings()), ("j.doe@example.com".into(), "label:atlas".into()));
+    }
+
+    #[gpui::test]
+    async fn open_chat_waits_for_the_selected_thread(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner);
+        let got = events(&view, cx);
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        // t-404 non ha risposta nel finto: la lettura fallisce
+        view.update(cx, |v, cx| {
+            v.select("t-404".into(), cx);
+            v.open_chat(cx);
+        });
+        assert!(got.borrow().is_empty(), "nessuna chat mentre il nuovo thread si carica");
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.open_chat(cx));
+        assert!(got.borrow().is_empty(), "nessuna chat se il nuovo thread non si legge");
+        assert!(view.read_with(cx, |v, _| v.shown_thread().is_none()));
     }
 
     #[test]
