@@ -186,6 +186,14 @@ impl MailPanelView {
         let account = self.account.read(cx).text(cx).trim().to_string();
         let query = self.query.read(cx).text(cx).trim().to_string();
         if account != self.saved_account || query != self.saved_query {
+            // una conferma in sospeso non deve rispondere a un id dell'account di prima
+            if account != self.saved_account {
+                self.selected = None;
+                self.thread = None;
+                self.thread_loading = None;
+                self.confirm_send = false;
+                self.clear_reply(cx);
+            }
             self.saved_account = account;
             self.saved_query = query;
             self.version_checked = false;
@@ -318,9 +326,11 @@ impl MailPanelView {
         let last = self.thread.as_ref()?.messages.last()?;
         let to = if last.reply_to.is_empty() { last.from.clone() } else { last.reply_to.clone() };
         Some(if self.reply_all {
-            let others: Vec<&str> =
-                [last.to.as_str(), last.cc.as_str()].into_iter().filter(|recipients| !recipients.is_empty()).collect();
-            format!("Reply all to {to}, {}", others.join(", "))
+            let recipients: Vec<&str> = [to.as_str(), last.to.as_str(), last.cc.as_str()]
+                .into_iter()
+                .filter(|recipients| !recipients.is_empty())
+                .collect();
+            format!("Reply all to {}", recipients.join(", "))
         } else {
             format!("Reply to {to}")
         })
@@ -359,6 +369,10 @@ impl MailPanelView {
                 match result {
                     // se nel frattempo e' cambiata la selezione l'editor e' gia' stato svuotato
                     Ok(()) => {
+                        // l'errore di un invio precedente farebbe credere che questo non sia partito
+                        if matches!(v.status, MailStatus::Error(_)) {
+                            v.status = MailStatus::Idle;
+                        }
                         if v.selected.as_deref() == Some(thread.id.as_str()) {
                             v.clear_reply(cx);
                             v.select(thread.id.clone(), cx);
@@ -781,6 +795,61 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "Testo");
         assert!(view.read_with(cx, |v, _| v.status_text()).contains("forbidden"));
+        runner.on("gmail reply m-202", superzed_sources::test_support::ok("{}"));
+        view.update(cx, |v, cx| {
+            v.request_send(cx);
+            v.confirm_send(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "");
+        assert!(!view.read_with(cx, |v, _| v.status_text()).contains("forbidden"), "un nuovo invio riuscito toglie l'errore");
+    }
+
+    #[gpui::test]
+    async fn changing_account_drops_a_pending_confirmation(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        runner.on("gmail reply m-202", superzed_sources::test_support::ok("{}"));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Testo", window, cx));
+            v.request_send(cx);
+            v.account_editor().update(cx, |e, cx| e.set_text("other@example.com", window, cx));
+            v.apply_settings(cx);
+            v.confirm_send(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail reply"), 0);
+        assert_eq!(view.read_with(cx, |v, _| v.send_summary()), None);
+        assert!(view.read_with(cx, |v, _| v.shown_thread().is_none()));
+        assert_eq!(view.read_with(cx, |v, cx| v.reply_editor().read(cx).text(cx)), "");
+    }
+
+    #[gpui::test]
+    async fn reply_all_summary_lists_only_the_known_recipients(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        runner.on("gmail thread modify t-200", superzed_sources::test_support::ok("{}"));
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner);
+        view.update(cx, |v, cx| v.select("t-200".into(), cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, cx| {
+            v.reply_editor().update(cx, |e, cx| e.set_text("Testo", window, cx));
+            v.set_reply_all(true, cx);
+            v.request_send(cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |v, _| v.send_summary()),
+            Some("Reply all to team@example.com, j.doe@example.com, bob@example.com".into())
+        );
+        view.update(cx, |v, _| {
+            if let Some(last) = v.thread.as_mut().and_then(|thread| thread.messages.last_mut()) {
+                last.to.clear();
+                last.cc.clear();
+            }
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.send_summary()), Some("Reply all to team@example.com".into()));
     }
 
     #[test]
