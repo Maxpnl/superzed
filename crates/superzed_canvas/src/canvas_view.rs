@@ -1595,9 +1595,6 @@ impl CanvasView {
         self.new_claude_in_kanban_with_prompt(None, window, cx);
     }
 
-    /// Chat nuova nel kanban in Nuove, con un prompt iniziale (Risolvi di una notifica).
-    /// Restituisce la chiave di sessione della chat: il suo nodo, quando c'e', lo trova
-    /// `node_for_session_key`.
     /// Chat nel kanban che con gog puo' leggere e creare bozze ma non inviare: l'invio e'
     /// solo il clic nel nodo Posta.
     pub fn new_claude_in_kanban_without_send(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) -> String {
@@ -1605,6 +1602,9 @@ impl CanvasView {
         self.new_claude_in_kanban_with_prompt(Some(prompt), window, cx)
     }
 
+    /// Chat nuova nel kanban in Nuove, con un prompt iniziale (Risolvi di una notifica).
+    /// Restituisce la chiave di sessione della chat: il suo nodo, quando c'e', lo trova
+    /// `node_for_session_key`.
     pub fn new_claude_in_kanban_with_prompt(&mut self, prompt: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> String {
         if self.kanban_node().is_none() {
             self.open_kanban(window, cx);
@@ -3744,12 +3744,12 @@ impl Render for CanvasView {
     }
 }
 
-/// Titoli di default salvati prima dell'interfaccia in inglese: si mostrano in inglese
-/// (un titolo scelto dall'utente resta com'e').
 pub(crate) fn no_send_exports() -> Vec<(String, String)> {
     vec![(superzed_sources::gmail::NO_SEND_ENV.to_string(), "1".to_string())]
 }
 
+/// Titoli di default salvati prima dell'interfaccia in inglese: si mostrano in inglese
+/// (un titolo scelto dall'utente resta com'e').
 fn legacy_title(kind: NodeKind, title: &str) -> &str {
     match (kind, title) {
         (NodeKind::Note, "nota") => "note",
