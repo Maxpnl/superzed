@@ -827,6 +827,30 @@ impl CanvasView {
         .detach_and_log_err(cx);
     }
 
+    /// Prompt che nomina account o filtro del nodo Posta: la chat cerca da sola con gog dentro
+    /// il filtro, quindi parte senza invio come quelle aperte dalla posta.
+    pub fn open_mail_settings_prompt(
+        &mut self,
+        body: String,
+        board_writes_auto: bool,
+        placeholders: crate::prompt_picker::Placeholders,
+        in_kanban: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = self.mail_view().map(|view| view.read(cx).settings());
+        let Some((account, query)) = settings.filter(|(account, query)| !account.trim().is_empty() && !query.trim().is_empty())
+        else {
+            self.warn("Set the Gmail account and the project query in the mail node first".to_string(), cx);
+            return;
+        };
+        let base = superzed_sources::project_query(&query, "").unwrap_or_default();
+        let body = crate::prompt_picker::with_mail_settings(&body, account.trim(), &base);
+        let prompt = crate::prompt_picker::full_prompt(&body, &placeholders, board_writes_auto);
+        self.next_claude_exports = no_send_exports();
+        self.new_claude_from_prompt(prompt, in_kanban, window, cx);
+    }
+
     /// Crea un nodo terminale (`restored = None`) o ricrea quello salvato.
     /// Il frame ripristinato entra subito nel modello, cosi' un salvataggio fatto
     /// mentre il PTY parte non lo perde; il contenuto arriva quando il terminale e' pronto.
@@ -6147,6 +6171,36 @@ mod tests {
         // la ricerca del prompt (max 30), non quella del nodo (max 50)
         let search = runner.calls().into_iter().find(|c| c.line().contains("gmail search --max 30 --")).unwrap();
         assert!(search.args.last().unwrap().starts_with("(from:@acme.example) after:"));
+        close_all(&canvas, cx);
+    }
+
+    #[gpui::test]
+    async fn the_mail_analysis_prompt_carries_the_filter_into_a_no_send_chat(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let runner = superzed_sources::test_support::gmail_runner();
+        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
+        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
+        cx.run_until_parked();
+        let placeholders =
+            crate::prompt_picker::Placeholders { project_dir: Some("/repo".into()), notifications_dir: "/n".into(), mail_file: None };
+        let body = crate::prompt_picker::MAIL_ANALYSIS_PROMPT.to_string();
+        canvas.update_in(cx, |c, window, cx| {
+            c.test_claude_pty = Some(zsh_spec());
+            c.open_mail_settings_prompt(body.clone(), false, placeholders.clone(), false, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(canvas.read_with(cx, |c, _| c.last_claude_command().is_none()), "senza account e filtro nessuna chat");
+        assert!(canvas.read_with(cx, |c, _| c.last_warning.clone()).is_some_and(|w| w.contains("mail node")));
+
+        configure_mail(&canvas, cx);
+        let searches_before = runner.count("gmail search");
+        canvas.update_in(cx, |c, window, cx| c.open_mail_settings_prompt(body, false, placeholders, false, window, cx));
+        cx.run_until_parked();
+        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
+        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
+        assert!(command.contains("gog --account j.doe@example.com --readonly"), "{command}");
+        assert!(command.contains("(from:@acme.example)"), "{command}");
+        assert_eq!(runner.count("gmail search"), searches_before, "la ricerca la fa la chat");
         close_all(&canvas, cx);
     }
 
