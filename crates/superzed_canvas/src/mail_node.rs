@@ -3,10 +3,10 @@
 //! progetto, che il canvas non lascia chiudere.
 use crate::node::NodeContent;
 use chrono::{DateTime, Local};
-use editor::Editor;
+use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    IntoElement, Render, SharedString, Task, Window,
+    IntoElement, Render, SharedString, Subscription, Task, Window,
 };
 use std::{sync::Arc, time::Duration};
 use superzed_sources::{
@@ -18,6 +18,7 @@ use ui::{IconButton, IconName, IconSize, Label, LabelSize, Tooltip, prelude::*, 
 pub const MAIL_SIZE: (f32, f32) = (900., 560.);
 pub const MAIL_TITLE: &str = "mail";
 pub const REFRESH_EVERY: Duration = Duration::from_secs(5 * 60);
+pub const APPLY_AFTER_TYPING: Duration = Duration::from_millis(800);
 const NOT_CONFIGURED: &str = "Set the account and the project query, then press Enter";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +83,9 @@ pub struct MailPanelView {
     loading: Option<Task<()>>,
     /// Account e query della ricerca in corso: solo una richiesta identica viene saltata.
     loading_key: Option<(String, String)>,
+    /// Ricerca del nodo usata dall'ultimo aggiornamento, per non ripeterlo se non e' cambiata.
+    searched: String,
+    apply_pending: Option<Task<()>>,
     thread_loading: Option<Task<()>>,
     draft_loading: Option<Task<()>>,
     /// Rilettura del thread sanificato per una chat o una bozza di Claude.
@@ -96,6 +100,7 @@ pub struct MailPanelView {
     /// si invia com'e'.
     loaded_draft: Option<(Draft, DraftContent)>,
     _ticker: Task<()>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<MailPanelEvent> for MailPanelView {}
@@ -125,6 +130,19 @@ impl MailPanelView {
                 break;
             }
         });
+        // l'account si applica solo uscendo dal campo: a meta' indirizzo gog darebbe errore
+        let mut subscriptions = vec![cx.subscribe(&account_editor, |this: &mut Self, _, event: &EditorEvent, cx| {
+            if matches!(event, EditorEvent::Blurred) {
+                this.apply_if_changed(cx);
+            }
+        })];
+        for editor in [&query_editor, &search] {
+            subscriptions.push(cx.subscribe(editor, |this: &mut Self, _, event: &EditorEvent, cx| match event {
+                EditorEvent::BufferEdited => this.apply_after_typing(cx),
+                EditorEvent::Blurred => this.apply_if_changed(cx),
+                _ => {}
+            }));
+        }
         let mut view = Self {
             account: account_editor,
             query: query_editor,
@@ -142,6 +160,8 @@ impl MailPanelView {
             zoom: 1.,
             loading: None,
             loading_key: None,
+            searched: String::new(),
+            apply_pending: None,
             thread_loading: None,
             draft_loading: None,
             claude_loading: None,
@@ -152,6 +172,7 @@ impl MailPanelView {
             drafts: Vec::new(),
             loaded_draft: None,
             _ticker: ticker,
+            _subscriptions: subscriptions,
         };
         view.refresh(cx);
         view
@@ -202,6 +223,7 @@ impl MailPanelView {
     /// Account e query del progetto si applicano con Invio (non a ogni tasto: ogni
     /// modifica sarebbe una ricerca su Gmail).
     pub(crate) fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        self.apply_pending = None;
         let account = self.account.read(cx).text(cx).trim().to_string();
         let query = self.query.read(cx).text(cx).trim().to_string();
         if account != self.saved_account || query != self.saved_query {
@@ -223,8 +245,29 @@ impl MailPanelView {
         self.refresh(cx);
     }
 
+    /// Dopo una pausa nella digitazione query e ricerca si applicano da sole: ogni tasto
+    /// sarebbe una ricerca su Gmail, e solo con Invio un filtro cambiato sembrava ignorato.
+    fn apply_after_typing(&mut self, cx: &mut Context<Self>) {
+        self.apply_pending = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(APPLY_AFTER_TYPING).await;
+            this.update(cx, |v, cx| v.apply_if_changed(cx)).ok();
+        }));
+    }
+
+    fn apply_if_changed(&mut self, cx: &mut Context<Self>) {
+        let account = self.account.read(cx).text(cx);
+        let query = self.query.read(cx).text(cx);
+        let search = self.search.read(cx).text(cx);
+        if account.trim() != self.saved_account || query.trim() != self.saved_query || search != self.searched {
+            self.apply_settings(cx);
+        } else {
+            self.apply_pending = None;
+        }
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let search = self.search.read(cx).text(cx);
+        self.searched = search.clone();
         let (Some(client), Some(query)) = (self.client(), project_query(&self.saved_query, &search)) else {
             self.loading = None;
             self.loading_key = None;
@@ -710,7 +753,7 @@ impl Render for MailPanelView {
                         IconButton::new("superzed-mail-refresh", IconName::RotateCw)
                             .icon_size(IconSize::Medium)
                             .tooltip(Tooltip::text("Refresh"))
-                            .on_click(cx.listener(|v, _, _, cx| v.refresh(cx))),
+                            .on_click(cx.listener(|v, _, _, cx| v.apply_settings(cx))),
                     ),
             )
             .child(
@@ -949,6 +992,32 @@ mod tests {
         assert_eq!(searches.last().and_then(|c| c.args.last()).map(String::as_str), Some("(label:atlas) policy"));
         assert_eq!(got.borrow().as_slice(), &[MailPanelEvent::SettingsChanged]);
         assert_eq!(view.read_with(cx, |v, _| v.settings()), ("j.doe@example.com".into(), "label:atlas".into()));
+    }
+
+    #[gpui::test]
+    async fn a_typed_query_applies_after_a_pause(cx: &mut TestAppContext) {
+        let runner = gmail_runner();
+        let (view, cx) = panel(cx, "j.doe@example.com", "from:@acme.example", runner.clone());
+        let got = events(&view, cx);
+        view.update_in(cx, |v, window, cx| {
+            v.query_editor().update(cx, |e, cx| e.set_text("from:@acme.example -from:no-reply", window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail search"), 1, "non a ogni tasto");
+        cx.executor().advance_clock(APPLY_AFTER_TYPING);
+        cx.run_until_parked();
+        let searches: Vec<_> = runner.calls().into_iter().filter(|c| c.line().contains("gmail search")).collect();
+        assert_eq!(searches.len(), 2);
+        assert_eq!(
+            searches.last().and_then(|c| c.args.last()).map(String::as_str),
+            Some("(from:@acme.example -from:no-reply)")
+        );
+        assert_eq!(got.borrow().as_slice(), &[MailPanelEvent::SettingsChanged]);
+        // Invio dopo la pausa: il filtro e' gia' applicato, la ricerca riparte una volta sola
+        view.update(cx, |v, cx| v.apply_settings(cx));
+        cx.executor().advance_clock(APPLY_AFTER_TYPING);
+        cx.run_until_parked();
+        assert_eq!(runner.count("gmail search"), 3);
     }
 
     #[gpui::test]
