@@ -139,6 +139,10 @@ impl SessionStore {
             return;
         };
         log::debug!("superzed sessions: interrupt {key} from {:?}", session.state);
+        // Esc al prompt non ferma shell e subagent in background: claude si risveglia lo stesso
+        if session.state == SessionState::Working && session.background_tasks > 0 {
+            return;
+        }
         if matches!(session.state, SessionState::Working | SessionState::NeedsInput(_)) {
             session.set_state(SessionState::Idle);
             cx.notify();
@@ -180,6 +184,8 @@ impl SessionStore {
                     cx.emit(SessionEvent::PhaseChanged { key: msg.node_key.clone() });
                 }
                 match msg.payload.get("hook_event_name").and_then(|v| v.as_str()) {
+                    // con lavoro in background il turno non e' finito: claude si risveglia
+                    Some("Stop") if session.background_tasks > 0 => {}
                     Some("Stop") => cx.emit(SessionEvent::Stopped { key: msg.node_key.clone(), failed: false }),
                     Some("StopFailure") => cx.emit(SessionEvent::Stopped { key: msg.node_key.clone(), failed: true }),
                     _ => {}
@@ -399,6 +405,28 @@ mod tests {
         });
         assert_eq!(state(cx, "k1"), SessionState::Idle, "NeedsInput interrotto");
         assert_eq!(state(cx, "k3"), SessionState::Done, "Done non cambia");
+    }
+
+    #[gpui::test]
+    fn waiting_on_background_work_survives_interrupt_and_is_not_a_stop(cx: &mut TestAppContext) {
+        let store = cx.update(|cx| init_test(cx, "/tmp/cfg".into(), None));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let _sub = cx.update(|cx| cx.subscribe(&store, move |_, e: &SessionEvent, _| seen.borrow_mut().push(e.clone())));
+        let stop = |tasks: serde_json::Value| serde_json::json!({"hook_event_name": "Stop", "background_tasks": tasks});
+        store.update(cx, |s, cx| {
+            s.register("k1".into(), "a".into(), None, crate::Phase::New, Default::default(), cx);
+            s.apply(msg("k1", Channel::Hook, serde_json::json!({"hook_event_name": "UserPromptSubmit"})), cx);
+            s.apply(msg("k1", Channel::Hook, stop(serde_json::json!([{"id": "a1", "type": "subagent", "status": "running"}]))), cx);
+            s.user_interrupted("k1", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(store.read_with(cx, |s, _| s.get("k1").unwrap().state.clone()), SessionState::Working);
+        assert!(!events.borrow().iter().any(|e| matches!(e, SessionEvent::Stopped { .. })), "il turno non e' finito");
+        store.update(cx, |s, cx| s.apply(msg("k1", Channel::Hook, stop(serde_json::json!([]))), cx));
+        cx.run_until_parked();
+        assert_eq!(store.read_with(cx, |s, _| s.get("k1").unwrap().state.clone()), SessionState::Done);
+        assert!(events.borrow().iter().any(|e| matches!(e, SessionEvent::Stopped { .. })));
     }
 
     #[test]

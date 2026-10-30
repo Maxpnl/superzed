@@ -2420,7 +2420,7 @@ impl CanvasView {
         let dragging = matches!(self.drag, Some(DragState::Move { .. }));
         let status = session.as_ref().and_then(|s| {
             let icon = superzed_sessions::ui::status_icon(&s.state, cx)?;
-            let tooltip = superzed_sessions::ui::status_tooltip(&s.state);
+            let tooltip = superzed_sessions::ui::status_tooltip(&s.state, s.background_tasks);
             Some(
                 div()
                     .id(("superzed-node-status", id))

@@ -43,9 +43,12 @@ pub fn working_pill(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Testo del tooltip dell'icona di stato (`Idle` non ha icona).
-pub fn status_tooltip(state: &SessionState) -> Option<String> {
+/// Testo del tooltip dell'icona di stato (`Idle` non ha icona). `background_tasks`:
+/// lavoro in background che claude sta aspettando (vedi `Session::background_tasks`).
+pub fn status_tooltip(state: &SessionState, background_tasks: usize) -> Option<String> {
     Some(match state {
+        SessionState::Working if background_tasks == 1 => "Claude is waiting for 1 background task".into(),
+        SessionState::Working if background_tasks > 1 => format!("Claude is waiting for {background_tasks} background tasks"),
         SessionState::NeedsInput(InputKind::Question) => "Claude asked you a question".into(),
         SessionState::NeedsInput(InputKind::Permission) => "Claude is asking for permission".into(),
         SessionState::NeedsInput(InputKind::Other) => "Claude is waiting for a reply".into(),
@@ -102,23 +105,27 @@ mod tests {
 
     #[test]
     fn status_tooltips() {
-        assert_eq!(status_tooltip(&SessionState::Working).as_deref(), Some("Claude is working"));
+        assert_eq!(status_tooltip(&SessionState::Working, 0).as_deref(), Some("Claude is working"));
         assert_eq!(
-            status_tooltip(&SessionState::NeedsInput(InputKind::Other)).as_deref(),
+            status_tooltip(&SessionState::Working, 2).as_deref(),
+            Some("Claude is waiting for 2 background tasks")
+        );
+        assert_eq!(
+            status_tooltip(&SessionState::NeedsInput(InputKind::Other), 0).as_deref(),
             Some("Claude is waiting for a reply")
         );
         assert_eq!(
-            status_tooltip(&SessionState::NeedsInput(InputKind::Question)).as_deref(),
+            status_tooltip(&SessionState::NeedsInput(InputKind::Question), 0).as_deref(),
             Some("Claude asked you a question")
         );
         assert_eq!(
-            status_tooltip(&SessionState::NeedsInput(InputKind::Permission)).as_deref(),
+            status_tooltip(&SessionState::NeedsInput(InputKind::Permission), 0).as_deref(),
             Some("Claude is asking for permission")
         );
-        assert_eq!(status_tooltip(&SessionState::Ended).as_deref(), Some("Session ended"));
-        assert_eq!(status_tooltip(&SessionState::Starting).as_deref(), Some("Starting…"));
-        assert_eq!(status_tooltip(&SessionState::Failed("boom".into())).as_deref(), Some("boom"));
-        assert_eq!(status_tooltip(&SessionState::Idle), None);
+        assert_eq!(status_tooltip(&SessionState::Ended, 0).as_deref(), Some("Session ended"));
+        assert_eq!(status_tooltip(&SessionState::Starting, 0).as_deref(), Some("Starting…"));
+        assert_eq!(status_tooltip(&SessionState::Failed("boom".into()), 0).as_deref(), Some("boom"));
+        assert_eq!(status_tooltip(&SessionState::Idle, 0), None);
     }
 
     #[gpui::test]

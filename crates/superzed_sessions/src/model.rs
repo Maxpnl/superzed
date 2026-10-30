@@ -65,6 +65,10 @@ pub struct Session {
     /// File scritti da claude con Edit/Write/MultiEdit/NotebookEdit in questa sessione
     /// (path assoluti, solo in memoria). Le modifiche via Bash non si vedono.
     pub touched_files: std::collections::BTreeSet<PathBuf>,
+    /// Shell, subagent e altro lavoro in background ancora in corso all'ultimo `Stop` della
+    /// chat principale: finche' non e' zero la chat resta `Working`, perche' claude si
+    /// risveglia da solo quando finiscono. Torna a zero appena la chat principale riparte.
+    pub background_tasks: usize,
     /// Quando la chat e' nata e quando claude ha finito di rispondere l'ultima volta:
     /// nel `data` del nodo, cosi' sopravvivono al riavvio.
     pub times: SessionTimes,
@@ -148,6 +152,7 @@ impl Session {
             phase: crate::Phase::New,
             state_changed_at: std::time::Instant::now(),
             touched_files: Default::default(),
+            background_tasks: 0,
             times: SessionTimes::default(),
         }
     }
@@ -241,6 +246,24 @@ pub fn apply_hook(session: &mut Session, payload: &serde_json::Value, focused: b
     let Some(event) = str_field(payload, "hook_event_name") else {
         return outcome;
     };
+    // i tool dei subagent portano `agent_id`: solo la chat principale dice che il turno e'
+    // ripartito (il prossimo `Stop` ricontera' il lavoro in background)
+    if payload.get("agent_id").is_none()
+        && matches!(
+            event,
+            "SessionStart"
+                | "UserPromptSubmit"
+                | "PreToolUse"
+                | "PostToolUse"
+                | "PostToolUseFailure"
+                | "PermissionRequest"
+                | "PermissionDenied"
+                | "StopFailure"
+                | "SessionEnd"
+        )
+    {
+        session.background_tasks = 0;
+    }
     let next = match event {
         "SessionStart" => {
             if let Some(id) = str_field(payload, "session_id")
@@ -277,6 +300,7 @@ pub fn apply_hook(session: &mut Session, payload: &serde_json::Value, focused: b
                 Some(SessionState::NeedsInput(InputKind::Other))
             }
             Some("idle_prompt") => match &session.state {
+                SessionState::Working if session.background_tasks > 0 => None,
                 SessionState::Working | SessionState::NeedsInput(_) => Some(SessionState::Idle),
                 _ => None,
             },
@@ -284,7 +308,14 @@ pub fn apply_hook(session: &mut Session, payload: &serde_json::Value, focused: b
         },
         "Stop" => {
             session.times.replied_at = Some(now_unix());
-            Some(if focused { SessionState::Idle } else { SessionState::Done })
+            session.background_tasks = payload.get("background_tasks").and_then(|v| v.as_array()).map_or(0, Vec::len);
+            Some(if session.background_tasks > 0 {
+                SessionState::Working
+            } else if focused {
+                SessionState::Idle
+            } else {
+                SessionState::Done
+            })
         }
         "StopFailure" => {
             session.times.replied_at = Some(now_unix());
@@ -382,6 +413,30 @@ mod tests {
             SessionState::Idle,
             "idle_prompt chiude un NeedsInput (dopo un Esc)"
         );
+    }
+
+    #[test]
+    fn stop_with_background_work_keeps_working_until_the_last_stop() {
+        let stop_with = |tasks: serde_json::Value| serde_json::json!({"hook_event_name": "Stop", "background_tasks": tasks});
+        let shell = serde_json::json!([{"id": "b1", "type": "shell", "status": "running", "description": "cargo test"}]);
+        let mut s = after(&["user_prompt_submit"]);
+        apply_hook(&mut s, &stop_with(shell.clone()), false);
+        assert_eq!((s.state.clone(), s.background_tasks), (SessionState::Working, 1));
+        assert!(s.times.replied_at.is_some(), "ha comunque risposto");
+        apply_hook(&mut s, &fx("notification_idle"), false);
+        assert_eq!(s.state, SessionState::Working, "idle_prompt non spegne chi aspetta il background");
+        // un subagent in background lavora: non azzera il conteggio
+        let subagent_tool = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a1"});
+        apply_hook(&mut s, &subagent_tool, false);
+        assert_eq!((s.state.clone(), s.background_tasks), (SessionState::Working, 1));
+        // la shell finisce, claude si risveglia e lavora
+        apply_hook(&mut s, &fx("pre_tool_use_bash"), false);
+        assert_eq!(s.background_tasks, 0, "la chat principale e' ripartita");
+        apply_hook(&mut s, &stop_with(serde_json::json!([])), false);
+        assert_eq!(s.state, SessionState::Done);
+        let mut focused = after(&["user_prompt_submit"]);
+        apply_hook(&mut focused, &stop_with(shell), true);
+        assert_eq!(focused.state, SessionState::Working, "anche col focus");
     }
 
     #[test]
