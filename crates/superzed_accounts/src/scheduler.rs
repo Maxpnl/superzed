@@ -92,7 +92,7 @@ fn remaining(l: Option<&Limit>, now: DateTime<Utc>) -> f32 {
     l.map(|l| l.remaining(now)).unwrap_or(UNKNOWN_REMAINING)
 }
 
-fn at_limit(l: Option<&Limit>, now: DateTime<Utc>) -> bool {
+pub(crate) fn at_limit(l: Option<&Limit>, now: DateTime<Utc>) -> bool {
     l.is_some_and(|l| !l.is_reset(now) && l.used_percent >= EXCLUDE_AT)
 }
 

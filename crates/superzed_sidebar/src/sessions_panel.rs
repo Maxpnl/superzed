@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use superzed_accounts::{Account, AccountStore};
 use superzed_accounts::meter::{self, LimitsRow, WindowMeter};
 use superzed_actions::SidebarView;
-use superzed_canvas::{NodeId, NodeKind, canvas_for, golden_color, node_color};
+use superzed_canvas::{NodeId, NodeKind, canvas_for, golden_color};
 use superzed_sessions::{Session, SessionState, SessionStore};
 use util::ResultExt as _;
 use crate::panel_ui::{group_header, group_is_open, matches_query, panel_header, pill, pill_background, status_dot, status_dot_size};
@@ -16,7 +16,7 @@ use ui::{ContextMenu, Disclosure, Icon, IconButton, IconName, IconSize, KeyBindi
 use workspace::{
     MultiWorkspace, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
-    superzed_tabs::project_tabs,
+    superzed_tabs::{TAB_COLORS, project_tabs},
 };
 
 /// Riga della vista Sessioni: un nodo terminale del canvas di un progetto, con
@@ -43,7 +43,8 @@ pub struct SessionGroup {
     pub label: SharedString,
     /// Ramo git del repository attivo del progetto, se c'e'.
     pub branch: Option<SharedString>,
-    pub color: Option<u8>,
+    /// Colore della tab, o uno libero assegnato qui se la tab non ne ha.
+    pub color: u8,
     pub is_active: bool,
     pub workspace: Entity<Workspace>,
     pub rows: Vec<SessionRow>,
@@ -176,10 +177,13 @@ impl SessionsPanel {
             return Vec::new();
         };
         let store = SessionStore::global(cx);
-        let mut groups: Vec<SessionGroup> = project_tabs(mw.read(cx), cx)
+        let tabs = project_tabs(mw.read(cx), cx);
+        let colors = project_colors(&tabs.iter().map(|tab| tab.color).collect::<Vec<_>>());
+        let mut groups: Vec<SessionGroup> = tabs
             .into_iter()
+            .zip(colors)
             .enumerate()
-            .filter_map(|(tab_ix, tab)| {
+            .filter_map(|(tab_ix, (tab, color))| {
                 let workspace = tab.workspace?;
                 let canvas = canvas_for(workspace.read(cx))?;
                 let canvas = canvas.read(cx);
@@ -203,7 +207,7 @@ impl SessionsPanel {
                     key: tab.path.clone().unwrap_or_else(|| tab.label.clone()),
                     branch: branch_name(&workspace, cx),
                     label: tab.label,
-                    color: tab.color,
+                    color,
                     is_active: tab.is_active,
                     workspace,
                     rows,
@@ -213,6 +217,28 @@ impl SessionsPanel {
         groups.sort_by_key(|g| !g.is_active); // stabile: il resto resta nell'ordine delle tab
         groups
     }
+}
+
+/// Un colore per progetto: le tab colorate tengono il loro, le altre prendono in ordine
+/// i colori non ancora usati; finiti quelli, si riparte dall'indice della tab.
+fn project_colors(tab_colors: &[Option<u8>]) -> Vec<u8> {
+    let mut used: Vec<u8> = tab_colors.iter().flatten().copied().collect();
+    tab_colors
+        .iter()
+        .enumerate()
+        .map(|(ix, color)| {
+            color.unwrap_or_else(|| {
+                let free = (0..TAB_COLORS).find(|c| !used.contains(c)).unwrap_or((ix % usize::from(TAB_COLORS)) as u8);
+                used.push(free);
+                free
+            })
+        })
+        .collect()
+}
+
+/// Stessa tinta del pallino della tab di progetto.
+fn project_color(color: u8, cx: &App) -> gpui::Hsla {
+    cx.theme().players().color_for_participant(u32::from(color % TAB_COLORS)).cursor
 }
 
 /// Ramo git del repository attivo del progetto del workspace.
@@ -424,13 +450,11 @@ impl SessionsPanel {
     fn render_group_header(&self, group: &SessionGroup, open: bool, cx: &Context<Self>) -> Stateful<Div> {
         let colors = cx.theme().colors();
         let tab_ix = group.tab_ix;
-        // avatar: iniziale sul colore della tab; il testo usa lo sfondo dell'editor, con
+        // avatar: iniziale sul colore del progetto; il testo usa lo sfondo dell'editor, con
         // cui i colori dei partecipanti sono pensati per contrastare (tema chiaro e scuro)
         let initial: SharedString = group.label.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default().into();
-        let (avatar_bg, avatar_text) = match node_color(group.color, cx) {
-            Some(color) => (color, Color::Custom(colors.editor_background)),
-            None => (colors.element_background, Color::Default),
-        };
+        let avatar_bg = project_color(group.color, cx);
+        let avatar_text = Color::Custom(colors.editor_background);
         let avatar = div()
             .flex_none()
             .size(rems(1.25))
@@ -479,6 +503,7 @@ impl SessionsPanel {
         tab_ix: usize,
         workspace: &Entity<Workspace>,
         project: Option<SharedString>,
+        color: u8,
         row: SessionRow,
         window: &Window,
         cx: &Context<Self>,
@@ -494,10 +519,7 @@ impl SessionsPanel {
             .id(("superzed-session-status", status_id))
             .debug_selector(move || format!("superzed-session-status-{status_id}"))
             .when_some(state.and_then(superzed_sessions::ui::status_tooltip), |d, tip| d.tooltip(Tooltip::text(tip)));
-        // tipo: chat claude (il colore agente dei temi base e' verde come «Working»,
-        // quindi l'ambra di warning) o terminale
-        let kind_color = if row.kind == NodeKind::Claude { status.warning } else { status.info };
-        let kind = div().flex_none().size(rems(0.625)).rounded_sm().bg(kind_color);
+        let kind = div().flex_none().size(rems(0.625)).rounded_sm().bg(project_color(color, cx));
         let uncommitted = (!row.uncommitted.is_empty()).then(|| {
             let tip = row.uncommitted.iter().map(|f| f.display.as_str()).collect::<Vec<_>>().join("\n");
             h_flex()
@@ -903,8 +925,8 @@ impl Render for SessionsPanel {
         retain_matching(&mut groups, &query, |g| &mut g.rows);
         // golden che aspettano o hanno finito: fuori dalla lista scorrevole, sopra
         let pinned = take_pinned(&mut groups, |g| &mut g.rows);
-        let pinned_from: Vec<(usize, Entity<Workspace>, SharedString)> =
-            groups.iter().map(|g| (g.tab_ix, g.workspace.clone(), g.label.clone())).collect();
+        let pinned_from: Vec<(usize, Entity<Workspace>, SharedString, u8)> =
+            groups.iter().map(|g| (g.tab_ix, g.workspace.clone(), g.label.clone(), g.color)).collect();
         groups.retain(|g| !g.rows.is_empty());
         let pinned_section = (!pinned.is_empty()).then(|| {
             v_flex()
@@ -916,8 +938,8 @@ impl Render for SessionsPanel {
                 .border_b_1()
                 .border_color(cx.theme().colors().border_variant)
                 .children(pinned.into_iter().filter_map(|(group_ix, row)| {
-                    let (tab_ix, workspace, label) = pinned_from.get(group_ix)?;
-                    Some(self.render_row(&mw, *tab_ix, workspace, Some(label.clone()), row, window, cx))
+                    let (tab_ix, workspace, label, color) = pinned_from.get(group_ix)?;
+                    Some(self.render_row(&mw, *tab_ix, workspace, Some(label.clone()), *color, row, window, cx))
                 }))
         });
         let empty: Option<AnyElement> = match (total, groups.is_empty() && pinned_section.is_none()) {
@@ -932,20 +954,20 @@ impl Render for SessionsPanel {
             _ => None,
         };
         let content: Vec<AnyElement> = if self.by_priority {
-            let mut rows: Vec<(usize, Entity<Workspace>, SharedString, SessionRow)> = groups
+            let mut rows: Vec<(usize, Entity<Workspace>, SharedString, u8, SessionRow)> = groups
                 .into_iter()
                 .flat_map(|group| {
-                    let (tab_ix, workspace, label) = (group.tab_ix, group.workspace.clone(), group.label.clone());
-                    group.rows.into_iter().map(move |row| (tab_ix, workspace.clone(), label.clone(), row))
+                    let (tab_ix, workspace, label, color) = (group.tab_ix, group.workspace.clone(), group.label.clone(), group.color);
+                    group.rows.into_iter().map(move |row| (tab_ix, workspace.clone(), label.clone(), color, row))
                 })
                 .collect();
-            rows.sort_by_key(|(_, _, _, row)| priority_key(row));
+            rows.sort_by_key(|(_, _, _, _, row)| priority_key(row));
             vec![
                 v_flex()
                     .debug_selector(|| "superzed-sessions-by-priority-list".into())
                     .gap_px()
-                    .children(rows.into_iter().map(|(tab_ix, workspace, label, row)| {
-                        self.render_row(&mw, tab_ix, &workspace, Some(label), row, window, cx)
+                    .children(rows.into_iter().map(|(tab_ix, workspace, label, color, row)| {
+                        self.render_row(&mw, tab_ix, &workspace, Some(label), color, row, window, cx)
                     }))
                     .into_any_element(),
             ]
@@ -967,7 +989,7 @@ impl Render for SessionsPanel {
                                 .pt_0p5()
                                 .gap_px()
                                 .children(rows.into_iter().map(|row| {
-                                    self.render_row(&mw, group.tab_ix, &group.workspace, None, row, window, cx)
+                                    self.render_row(&mw, group.tab_ix, &group.workspace, None, group.color, row, window, cx)
                                 })),
                         )
                     })
@@ -1044,6 +1066,13 @@ mod tests {
             "la cartella doppia conta una volta"
         );
         assert!(exclusion_entries(&account, &[], home).is_empty());
+    }
+
+    #[test]
+    fn every_project_gets_a_color_and_uncolored_ones_avoid_the_chosen_ones() {
+        assert_eq!(project_colors(&[None, Some(0), None, Some(2)]), vec![1, 0, 3, 2]);
+        let all: Vec<Option<u8>> = (0..TAB_COLORS).map(Some).chain([None]).collect();
+        assert_eq!(project_colors(&all).last(), Some(&0), "finiti i colori, l'indice della tab");
     }
 
     fn row(node: u64, kind: NodeKind, title: &str, account: Option<&str>, model: Option<&str>) -> SessionRow {

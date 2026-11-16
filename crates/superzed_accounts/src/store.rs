@@ -176,6 +176,14 @@ impl AccountStore {
         self.quotas.get(id)
     }
 
+    /// Finestra di 5 ore o settimana esaurita, come per l'esclusione dello scheduler.
+    pub fn at_limit(&self, id: &str) -> bool {
+        let now = self.now();
+        self.quota(id).is_some_and(|q| {
+            crate::scheduler::at_limit(q.session.as_ref(), now) || crate::scheduler::at_limit(q.weekly.as_ref(), now)
+        })
+    }
+
     pub fn now(&self) -> DateTime<Utc> {
         self.test_now.unwrap_or_else(Utc::now)
     }

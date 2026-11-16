@@ -47,6 +47,10 @@ actions!(
         /// Rende golden (o normale) il nodo con il focus o i nodi selezionati: bordo
         /// dorato, in cima alle Sessioni, risparmiato da «Close idle chats».
         ToggleGolden,
+        /// Passa la chat con il focus a un account scelto: claude scrive un documento di
+        /// handoff, la chat si chiude e una nuova sull'account lo riprende (account al
+        /// limite: la stessa conversazione si sposta sull'altro account).
+        HandoffChat,
         /// Rinomina la tab di progetto attiva.
         RenameProjectTab,
         /// Passa al colore successivo per la tab di progetto attiva.
@@ -121,6 +125,7 @@ pub const ALL_ACTION_NAMES: &[&str] = &[
     "superzed::RenameNode",
     "superzed::CycleNodeColor",
     "superzed::ToggleGolden",
+    "superzed::HandoffChat",
     "superzed::RenameProjectTab",
     "superzed::CycleProjectTabColor",
     "superzed::ActivateProjectTab",

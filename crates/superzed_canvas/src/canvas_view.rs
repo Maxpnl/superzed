@@ -30,6 +30,7 @@ pub use automations::{AutomationRow, AutomationRuntime};
 mod commit_close;
 mod done;
 mod follow;
+mod handoff;
 pub use done::DoneStage;
 mod navigation;
 mod scroll_route;
@@ -283,6 +284,8 @@ pub struct CanvasView {
     dropping: bool,
     /// Chat a cui e' stato chiesto di committare prima di chiudersi (`commit_close`).
     pub(crate) commit_closes: HashMap<NodeId, commit_close::CommitClose>,
+    /// Chat a cui e' stato chiesto il documento di handoff (`handoff`).
+    pub(crate) handoffs: HashMap<NodeId, handoff::Handoff>,
     /// Lancia `git status` per il controllo finale di `commit_close` (finto nei test).
     pub(crate) git_runner: Arc<dyn superzed_sources::runner::Runner>,
 }
@@ -356,6 +359,7 @@ impl CanvasView {
             kanban_phases: HashMap::default(),
             dropping: false,
             commit_closes: HashMap::default(),
+            handoffs: HashMap::default(),
             git_runner: Arc::new(superzed_sources::runner::ProcessRunner),
         };
         // superzed: scheduler delle automazioni
@@ -415,6 +419,7 @@ impl CanvasView {
                 this.automation_sessions_changed(cx);
                 // una chat con commit chiesto interrotta o uscita: niente chiusura
                 this.commit_close_sessions_changed(cx);
+                this.handoff_sessions_changed(cx);
                 let attention = this.attention(cx);
                 if this.last_attention != attention {
                     this.last_attention = attention;
@@ -444,6 +449,7 @@ impl CanvasView {
                     if let Some(node) = this.node_for_session_key(key) {
                         this.automation_stopped(node, *failed, cx);
                         this.commit_close_stopped(node, *failed, cx);
+                        this.handoff_stopped(node, *failed, cx);
                     }
                 }
                 superzed_sessions::SessionEvent::Cleared { key } => {
@@ -563,6 +569,7 @@ impl CanvasView {
             }
             self.remove_automation(*id, cx);
             self.commit_closes.remove(id);
+            self.handoffs.remove(id);
         }
         if !self.model.remove(ids).is_empty() {
             self.nodes_changed(cx);
@@ -1274,6 +1281,7 @@ impl CanvasView {
             self.starting_terminals.remove(id);
             self.remove_automation(*id, cx);
             self.commit_closes.remove(id);
+            self.handoffs.remove(id);
         }
         if !self.model.remove(ids).is_empty() {
             self.nodes_changed(cx);
@@ -2904,6 +2912,7 @@ impl CanvasView {
         let menu_keys = self.menu_keys.clone();
         let golden = frame.golden;
         let closable = frame.kind != NodeKind::Mail;
+        let handoff = frame.kind == NodeKind::Claude && !self.automations.contains_key(&NodeId(id));
         let title = ui::right_click_menu(("superzed-node-menu", id))
             .trigger(move |_, _, _| head)
             .menu(move |window, cx| {
@@ -2926,6 +2935,17 @@ impl CanvasView {
                         menu = menu.entry("GitHub…", None, move |window, cx| {
                             c0.update(cx, |c, cx| c.github_for_node(NodeId(id), window, cx)).ok();
                         });
+                    }
+                    if handoff {
+                        let c5 = canvas.clone();
+                        menu = menu.item(
+                            ui::ContextMenuEntry::new("Hand off to account…")
+                                .icon(ui::IconName::UserGroup)
+                                .action(Box::new(superzed_actions::HandoffChat))
+                                .handler(move |window, cx| {
+                                    c5.update(cx, |c, cx| c.pick_handoff_account(NodeId(id), window, cx)).ok();
+                                }),
+                        );
                     }
                     let (c1, c2, c3, c4) = (canvas.clone(), canvas.clone(), canvas.clone(), canvas.clone());
                     let menu = menu.item(
@@ -3794,6 +3814,9 @@ impl Render for CanvasView {
             .on_action(cx.listener(|this, _: &superzed_actions::ToggleGolden, window, cx| {
                 let ids = this.target_nodes(window, cx);
                 this.toggle_golden(&ids, cx);
+            }))
+            .on_action(cx.listener(|this, _: &superzed_actions::HandoffChat, window, cx| {
+                this.handoff_focused_chat(window, cx)
             }))
             .on_action(cx.listener(|this, _: &superzed_actions::ZoomToFocusedNode, window, cx| {
                 this.zoom_to_focused_node(window, cx)

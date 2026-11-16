@@ -53,6 +53,20 @@ pub fn picker_rows(store: &AccountStore, loads: &HashMap<String, AccountLoad>, p
     (rows, selected)
 }
 
+/// Handoff: se il migliore e' l'account della chat, il migliore fra gli altri non esclusi
+/// (nessuno: si resta). Con un solo account resta quello.
+pub fn prefer_other(rows: &[PickerRow], selected: usize, current: &str) -> usize {
+    if rows.get(selected).is_none_or(|row| row.id != current) {
+        return selected;
+    }
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| row.id != current)
+        .filter_map(|(ix, row)| row.score.map(|score| (ix, score)))
+        .max_by_key(|(_, score)| *score)
+        .map_or(selected, |(ix, _)| ix)
+}
+
 /// Riga successiva (`step` 1) o precedente (-1) fra quelle non escluse; nessuna: si resta.
 pub fn step_selection(rows: &[PickerRow], from: usize, step: isize) -> usize {
     let mut ix = from as isize + step;
@@ -212,6 +226,15 @@ mod tests {
 
     fn row(id: &str, score: Option<i32>) -> PickerRow {
         PickerRow { id: id.into(), label: id.into(), email: None, five_hour: None, weekly: None, load: 0, status: "ok", score, excluded_here: false }
+    }
+
+    #[test]
+    fn handoff_preselects_the_best_other_account() {
+        let rows = [row("a", Some(9)), row("b", Some(3)), row("c", None), row("d", Some(5))];
+        assert_eq!(prefer_other(&rows, 0, "a"), 3, "a e' la chat: il migliore degli altri");
+        assert_eq!(prefer_other(&rows, 1, "a"), 1, "il migliore non e' la chat: resta");
+        assert_eq!(prefer_other(&[row("a", Some(9))], 0, "a"), 0, "un solo account: quello");
+        assert_eq!(prefer_other(&[row("a", Some(9)), row("b", None)], 0, "a"), 0, "gli altri sono esclusi");
     }
 
     #[test]

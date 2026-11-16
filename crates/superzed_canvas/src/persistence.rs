@@ -4,6 +4,7 @@ use fs::{Fs, RenameOptions};
 use gpui::{point, size};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use util::ResultExt as _;
 
 pub const PROJECT_FILE_VERSION: u32 = 1;
 const PROJECT_DIR: &str = ".superzed";
@@ -264,8 +265,23 @@ pub async fn save_project_file(fs: &dyn Fs, root: &Path, file: &ProjectFile) -> 
     let path = project_file_path(root);
     let dir = path.parent().context("project.json has no folder")?;
     fs.create_dir(dir).await?;
+    ensure_ignored(fs, dir).await.log_err();
     let text = serde_json::to_string_pretty(file)?;
     fs.atomic_write(path, text).await
+}
+
+const PROJECT_GITIGNORE: &str = "/project.json\n/project.json.bak*\n";
+
+/// Claude Code allega a ogni risultato di Bash il diff dei file non ignorati da git che
+/// sono cambiati nel frattempo: senza questo, ogni pan, zoom o spostamento di un nodo
+/// mentre una chat lavora le arriva come una modifica di project.json. `prompts/` resta
+/// fuori, si puo' committare. Un `.gitignore` gia' presente non si tocca.
+async fn ensure_ignored(fs: &dyn Fs, dir: &Path) -> anyhow::Result<()> {
+    let path = dir.join(".gitignore");
+    if fs.is_file(&path).await {
+        return Ok(());
+    }
+    fs.atomic_write(path, PROJECT_GITIGNORE.to_string()).await
 }
 
 #[cfg(test)]
@@ -425,6 +441,17 @@ mod tests {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/repo", json!({})).await;
         assert!(matches!(load_project_file(fs.as_ref(), Path::new("/repo")).await, LoadOutcome::Missing));
+    }
+
+    #[gpui::test]
+    async fn save_ignores_project_json_and_keeps_an_existing_gitignore(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        save_project_file(fs.as_ref(), Path::new("/repo"), &sample()).await.unwrap();
+        assert_eq!(fs.load(Path::new("/repo/.superzed/.gitignore")).await.unwrap(), PROJECT_GITIGNORE);
+
+        fs.insert_tree("/other", json!({ ".superzed": { ".gitignore": "mine\n" } })).await;
+        save_project_file(fs.as_ref(), Path::new("/other"), &sample()).await.unwrap();
+        assert_eq!(fs.load(Path::new("/other/.superzed/.gitignore")).await.unwrap(), "mine\n");
     }
 
     #[gpui::test]

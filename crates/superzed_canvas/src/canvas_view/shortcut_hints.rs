@@ -206,6 +206,7 @@ fn catalog() -> Vec<(HintGroup, &'static str, bool, Box<dyn Action>)> {
         (Node, "Rename", false, Box::new(a::RenameNode)),
         (Node, "Next color", false, Box::new(a::CycleNodeColor)),
         (Node, "Golden", false, Box::new(a::ToggleGolden)),
+        (Node, "Hand off to account", false, Box::new(a::HandoffChat)),
         (Node, "Close", false, Box::new(a::CloseNode)),
         // solo nel kanban (o in una sua chat)
         (Node, "Move to next phase", false, Box::new(a::MoveCardNext)),

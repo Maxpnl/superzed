@@ -8599,6 +8599,10 @@ mod tests {
             assert_eq!(superzed_resolve(cx, "cmd-g", stack).as_deref(), Some("superzed::ToggleGolden"), "{stack:?}");
         }
         assert_eq!(superzed_resolve(cx, "cmd-g", &editor).as_deref(), Some("search::SelectNextMatch"), "nell'editor resta la ricerca");
+        // superzed: cmd-shift-h passa la chat con il focus a un altro account
+        for stack in [&canvas[..], &["Workspace", "Canvas", "Terminal"][..]] {
+            assert_eq!(superzed_resolve(cx, "cmd-shift-h", stack).as_deref(), Some("superzed::HandoffChat"), "{stack:?}");
+        }
         // superzed: kanban (2b)
         assert_eq!(superzed_resolve(cx, "cmd-alt-k", &canvas).as_deref(), Some("superzed::OpenKanban"));
         let kanban = ["Workspace", "Canvas", "Kanban"];

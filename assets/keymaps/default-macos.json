@@ -1870,6 +1870,9 @@
       // superzed: golden per il nodo con il focus (nelle note l'Editor non lega cmd-g,
       // quindi vale anche li'; nell'editor dei file resta search::SelectNextMatch)
       "cmd-g": "superzed::ToggleGolden",
+      // superzed: handoff della chat con il focus su un altro account (nel workspace
+      // cmd-shift-h resta la sostituzione nella ricerca di progetto)
+      "cmd-shift-h": "superzed::HandoffChat",
       // superzed: navigazione tra le chat (kanban, Automazioni, nodi liberi); nelle note
       // (Editor, piu' profondo) cmd+frecce restano quelle dell'editor
       "cmd-up": "superzed::FocusChatUp",
