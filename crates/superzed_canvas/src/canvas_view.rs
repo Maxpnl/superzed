@@ -84,7 +84,7 @@ const NOTE_MIN_SIZE: (f32, f32) = (120., 80.);
 /// agganciate (quelle agganciate prendono la dimensione dal contenitore, che ha la sua).
 fn free_resizable(frame: &NodeFrame) -> bool {
     match frame.kind {
-        NodeKind::Note | NodeKind::Mail => true,
+        NodeKind::Note => true,
         NodeKind::Shell | NodeKind::Claude | NodeKind::Source => frame.dock.is_none(),
         NodeKind::Kanban | NodeKind::Automations => false,
     }
@@ -204,7 +204,6 @@ pub struct CanvasView {
     /// Ultimo stato per progetto visto sul workspace (per salvare solo se cambia).
     last_state: Option<SuperzedProjectState>,
     node_subscriptions: HashMap<NodeId, Subscription>,
-    mail_views: HashMap<NodeId, Entity<crate::mail_node::MailPanelView>>,
     last_warning: Option<String>,
     /// Nodi terminale, in aggiunta a `contents` (che li vede solo come `dyn NodeContent`).
     terminals: HashMap<NodeId, (Entity<TerminalView>, Entity<Terminal>)>,
@@ -242,8 +241,6 @@ pub struct CanvasView {
     /// Come `dock_next_claude`: la prossima chat claude nuova nasce in questo punto
     /// (accanto al pannello di una fonte, `open_chat_beside`).
     next_claude_origin: Option<Point<f32>>,
-    /// Variabili d'ambiente per la prossima chat claude nuova (consumate da `open_new_claude`).
-    next_claude_exports: Vec<(String, String)>,
     /// Connessioni della vista Fonti usate dal progetto (project.json → `sources`).
     project_sources: Vec<String>,
     /// Spunte cambiate mentre project.json si caricava: `apply_file` sostituisce la lista,
@@ -325,7 +322,6 @@ impl CanvasView {
             persist: None,
             last_state: None,
             node_subscriptions: HashMap::default(),
-            mail_views: HashMap::default(),
             last_warning: None,
             terminals: HashMap::default(),
             sessions: HashMap::default(),
@@ -340,7 +336,6 @@ impl CanvasView {
             done_pipeline: Default::default(),
             next_claude_automation: None,
             next_claude_origin: None,
-            next_claude_exports: Vec::new(),
             project_sources: Vec::new(),
             pending_source_changes: Vec::new(),
             foreign_nodes: Vec::new(),
@@ -560,7 +555,6 @@ impl CanvasView {
                 content.on_close(cx);
             }
             self.node_subscriptions.remove(id);
-            self.mail_views.remove(id);
             self.terminals.remove(id);
             self.pending_sessions.remove(id);
             self.starting_terminals.remove(id);
@@ -742,122 +736,6 @@ impl CanvasView {
         }
     }
 
-    /// Prompt che usa `{mail_file}`: prima scrive in `.superzed/mail/inbox.json` i thread
-    /// del filtro arrivati dopo l'ultimo controllo, poi apre la chat (senza invio). L'ultimo
-    /// controllo avanza solo a inbox scritta: un errore non fa perdere email.
-    pub fn open_mail_prompt(
-        &mut self,
-        body: String,
-        board_writes_auto: bool,
-        mut placeholders: crate::prompt_picker::Placeholders,
-        in_kanban: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use superzed_sources::gmail::{
-            INBOX_FILE, INBOX_MAX_THREADS, MAIL_DIR, STATE_FILE, inbox_json, inbox_truncated, parse_last_check, since_query,
-            state_json, truncate_bodies,
-        };
-        let settings = self.mail_view().map(|view| view.read(cx).settings());
-        let Some((account, query)) = settings.filter(|(account, query)| !account.trim().is_empty() && !query.trim().is_empty())
-        else {
-            self.warn("Set the Gmail account and the project query in the mail node first".to_string(), cx);
-            return;
-        };
-        let Some((fs, root)) = self.project_root(cx) else {
-            self.warn("The mail prompt needs a project folder".to_string(), cx);
-            return;
-        };
-        let client = superzed_sources::GmailClient::new(Self::mail_runner(cx), account.trim());
-        let now = chrono::Utc::now();
-        cx.spawn_in(window, async move |this, cx| {
-            let result: Result<(PathBuf, bool), String> = async {
-                let dir = root.join(MAIL_DIR);
-                let state_path = dir.join(STATE_FILE);
-                let last_check = fs.load(&state_path).await.ok().and_then(|text| parse_last_check(&text));
-                let since = since_query(last_check, now);
-                let base = superzed_sources::project_query(&query, "").unwrap_or_default();
-                let full_query = format!("{base} {since}");
-                let summaries = client.search(&full_query, INBOX_MAX_THREADS).await?;
-                let truncated = inbox_truncated(summaries.len());
-                let mut threads = Vec::new();
-                let mut errors = Vec::new();
-                // un thread che gog non legge si salta e si segnala: interrompere lascerebbe
-                // fermo l'ultimo controllo e ogni giro successivo ritroverebbe lo stesso thread
-                for summary in summaries {
-                    match client.thread(&summary.id, true).await {
-                        Ok(mut thread) => {
-                            truncate_bodies(&mut thread, superzed_sources::CONTEXT_MAX_CHARS);
-                            threads.push(thread);
-                        }
-                        Err(error) => {
-                            log::warn!("gmail: thread {} non letto per il prompt: {error}", summary.id);
-                            errors.push((summary.id, error));
-                        }
-                    }
-                }
-                fs.create_dir(&dir).await.map_err(|error| format!("{}: {error}", dir.display()))?;
-                let ignore = dir.join(".gitignore");
-                if !fs.is_file(&ignore).await {
-                    fs.atomic_write(ignore.clone(), "*\n".to_string())
-                        .await
-                        .map_err(|error| format!("{}: {error}", ignore.display()))?;
-                }
-                let inbox = dir.join(INBOX_FILE);
-                fs.atomic_write(inbox.clone(), inbox_json(client.account(), &base, &since, truncated, &threads, &errors))
-                    .await
-                    .map_err(|error| format!("{}: {error}", inbox.display()))?;
-                fs.atomic_write(state_path.clone(), state_json(now))
-                    .await
-                    .map_err(|error| format!("{}: {error}", state_path.display()))?;
-                Ok((inbox, truncated))
-            }
-            .await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok((inbox, truncated)) => {
-                    placeholders.mail_file = Some(inbox);
-                    let prompt = crate::prompt_picker::full_prompt(&body, &placeholders, board_writes_auto);
-                    this.next_claude_exports = no_send_exports();
-                    this.new_claude_from_prompt(prompt, in_kanban, window, cx);
-                    if truncated {
-                        this.warn(
-                            format!(
-                                "Mail prompt: more than {INBOX_MAX_THREADS} new threads, the oldest were left out — narrow the project query in the mail node"
-                            ),
-                            cx,
-                        );
-                    }
-                }
-                Err(message) => this.warn(format!("Mail prompt: {message}"), cx),
-            })
-        })
-        .detach_and_log_err(cx);
-    }
-
-    /// Prompt che nomina account o filtro del nodo Posta: la chat cerca da sola con gog dentro
-    /// il filtro, quindi parte senza invio come quelle aperte dalla posta.
-    pub fn open_mail_settings_prompt(
-        &mut self,
-        body: String,
-        board_writes_auto: bool,
-        placeholders: crate::prompt_picker::Placeholders,
-        in_kanban: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let settings = self.mail_view().map(|view| view.read(cx).settings());
-        let Some((account, query)) = settings.filter(|(account, query)| !account.trim().is_empty() && !query.trim().is_empty())
-        else {
-            self.warn("Set the Gmail account and the project query in the mail node first".to_string(), cx);
-            return;
-        };
-        let base = superzed_sources::project_query(&query, "").unwrap_or_default();
-        let body = crate::prompt_picker::with_mail_settings(&body, account.trim(), &base);
-        let prompt = crate::prompt_picker::full_prompt(&body, &placeholders, board_writes_auto);
-        self.next_claude_exports = no_send_exports();
-        self.new_claude_from_prompt(prompt, in_kanban, window, cx);
-    }
-
     /// Crea un nodo terminale (`restored = None`) o ricrea quello salvato.
     /// Il frame ripristinato entra subito nel modello, cosi' un salvataggio fatto
     /// mentre il PTY parte non lo perde; il contenuto arriva quando il terminale e' pronto.
@@ -910,8 +788,7 @@ impl CanvasView {
         let saved = superzed_sessions::SavedSession::default();
         let key = uuid::Uuid::new_v4().to_string();
         let account = self.account_for_new_chat(cx);
-        let (mut spec, init) = self.claude_spec_for(&account, &saved, &key, initial_prompt, cx);
-        terminal_node::prepend_exports(&mut spec, &std::mem::take(&mut self.next_claude_exports));
+        let (spec, init) = self.claude_spec_for(&account, &saved, &key, initial_prompt, cx);
         let spec = self.claude_pty(spec, cx);
         self.open_claude_terminal(None, None, spec, init, window, cx);
         key
@@ -1313,75 +1190,6 @@ impl CanvasView {
         id
     }
 
-    pub fn mail_runner(cx: &App) -> Arc<dyn superzed_sources::Runner> {
-        superzed_sources::ConnectionStore::global(cx)
-            .map(|store| store.read(cx).runner())
-            .unwrap_or_else(|| Arc::new(superzed_sources::ProcessRunner))
-    }
-
-    pub fn mail_node(&self) -> Option<NodeId> {
-        self.model.frames().iter().find(|f| f.kind == NodeKind::Mail).map(|f| f.id)
-    }
-
-    pub fn mail_view(&self) -> Option<Entity<crate::mail_node::MailPanelView>> {
-        let id = self.mail_node()?;
-        self.mail_views.get(&id).cloned()
-    }
-
-    fn new_mail_view(
-        &mut self,
-        data: &serde_json::Value,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<crate::mail_node::MailPanelView> {
-        let (account, query) = crate::mail_node::mail_data(data);
-        let runner = Self::mail_runner(cx);
-        cx.new(|cx| crate::mail_node::MailPanelView::new(account, query, runner, window, cx))
-    }
-
-    /// Il nodo Posta del progetto, creato se manca: a destra del kanban (sotto le
-    /// Automazioni crescerebbe sopra di lui quando se ne aggiungono). Come i contenitori,
-    /// nasce prima di `loaded` e da solo non scrive project.json.
-    pub fn ensure_mail_node(&mut self, window: &mut Window, cx: &mut Context<Self>) -> NodeId {
-        if let Some(id) = self.mail_node() {
-            return id;
-        }
-        let visible = self.viewport.to_canvas(point(0., 0.));
-        let origin = self
-            .kanban_node()
-            .and_then(|kanban| self.model.frame(kanban))
-            .map(|f| point(f.origin.x + f.size.width + automations_layout::CONTAINER_GAP, f.origin.y))
-            .unwrap_or(visible);
-        let view = self.new_mail_view(&serde_json::Value::Null, window, cx);
-        let (width, height) = crate::mail_node::MAIL_SIZE;
-        let id = self.model.add(NodeKind::Mail, origin, size(width, height), crate::mail_node::MAIL_TITLE);
-        self.contents.insert(id, Box::new(crate::mail_node::MailNode::new(view.clone())));
-        self.apply_font_zoom(id, cx);
-        self.watch_mail(id, &view, window, cx);
-        cx.notify();
-        id
-    }
-
-    fn watch_mail(
-        &mut self,
-        id: NodeId,
-        view: &Entity<crate::mail_node::MailPanelView>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.mail_views.insert(id, view.clone());
-        let subscription = cx.subscribe_in(view, window, |this, _, event: &crate::mail_node::MailPanelEvent, window, cx| match event {
-            crate::mail_node::MailPanelEvent::SettingsChanged => this.schedule_save(cx),
-            crate::mail_node::MailPanelEvent::OpenChat { prompt } => {
-                this.new_claude_in_kanban_without_send(prompt.clone(), window, cx);
-            }
-            crate::mail_node::MailPanelEvent::PrepareDraft { prompt } => {
-                this.new_claude_in_kanban_without_send(prompt.clone(), window, cx);
-            }
-        });
-        self.node_subscriptions.insert(id, subscription);
-    }
-
     /// Eventi del pannello: filtro cambiato → salvataggio; "Apri chat" → chat accanto al
     /// pannello o nel kanban. Il nodo si ritrova dalla vista (`renumber_node` puo' cambiarne l'id).
     fn watch_source(&mut self, id: NodeId, view: &Entity<SourcePanelView>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1720,13 +1528,6 @@ impl CanvasView {
     /// Crea il kanban se manca; il focus va alla chat nuova quando il PTY e' pronto.
     pub fn new_claude_in_kanban(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_claude_in_kanban_with_prompt(None, window, cx);
-    }
-
-    /// Chat nel kanban che con gog puo' leggere e creare bozze ma non inviare: l'invio e'
-    /// solo il clic nel nodo Posta.
-    pub fn new_claude_in_kanban_without_send(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) -> String {
-        self.next_claude_exports = no_send_exports();
-        self.new_claude_in_kanban_with_prompt(Some(prompt), window, cx)
     }
 
     /// Chat nuova nel kanban in Nuove, con un prompt iniziale (Risolvi di una notifica).
@@ -2381,11 +2182,6 @@ impl CanvasView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // il nodo Posta e' fisso: chiuderlo toglierebbe la posta al progetto
-        let ids: Vec<NodeId> = ids
-            .into_iter()
-            .filter(|id| self.model.frame(*id).is_none_or(|f| f.kind != NodeKind::Mail))
-            .collect();
         if ids.is_empty() {
             return;
         }
@@ -2911,7 +2707,6 @@ impl CanvasView {
         let github = self.is_done_chat(NodeId(id), cx);
         let menu_keys = self.menu_keys.clone();
         let golden = frame.golden;
-        let closable = frame.kind != NodeKind::Mail;
         let handoff = frame.kind == NodeKind::Claude && !self.automations.contains_key(&NodeId(id));
         let title = ui::right_click_menu(("superzed-node-menu", id))
             .trigger(move |_, _, _| head)
@@ -2948,7 +2743,7 @@ impl CanvasView {
                         );
                     }
                     let (c1, c2, c3, c4) = (canvas.clone(), canvas.clone(), canvas.clone(), canvas.clone());
-                    let menu = menu.item(
+                    menu.item(
                         ui::ContextMenuEntry::new("Rename")
                             .icon(ui::IconName::Pencil)
                             .action(Box::new(superzed_actions::RenameNode))
@@ -2971,11 +2766,9 @@ impl CanvasView {
                             .handler(move |_, cx| {
                                 c4.update(cx, |c, cx| c.toggle_golden(&[NodeId(id)], cx)).ok();
                             }),
-                    );
-                    if !closable {
-                        return menu;
-                    }
-                    menu.separator().item(
+                    )
+                    .separator()
+                    .item(
                         ui::ContextMenuEntry::new("Close")
                             .icon(ui::IconName::Close)
                             .action(Box::new(superzed_actions::CloseNode))
@@ -3398,7 +3191,6 @@ impl CanvasView {
         if cx.try_global::<DefaultContainers>().map_or(true, |d| d.0) {
             self.ensure_container(DockKind::Kanban, cx);
             self.ensure_container(DockKind::Automations, cx);
-            self.ensure_mail_node(window, cx);
         }
         for (id, used) in std::mem::take(&mut self.pending_source_changes) {
             toggle_source(&mut self.project_sources, &id, used);
@@ -3491,9 +3283,6 @@ impl CanvasView {
         if let Some(runtime) = self.automations.remove(&old) {
             self.automations.insert(new, runtime);
         }
-        if let Some(view) = self.mail_views.remove(&old) {
-            self.mail_views.insert(new, view);
-        }
         let subscription = self.node_subscriptions.remove(&old);
         match self.terminals.remove(&old) {
             Some((view, terminal)) => {
@@ -3564,11 +3353,6 @@ impl CanvasView {
                 let view = cx.new(|cx| SourcePanelView::new(connection, filter, root, window, cx));
                 self.watch_source(frame.id, &view, window, cx);
                 self.insert_restored_node(frame, Box::new(SourceNode::new(view)), cx);
-            }
-            NodeKind::Mail => {
-                let view = self.new_mail_view(data, window, cx);
-                self.watch_mail(frame.id, &view, window, cx);
-                self.insert_restored_node(frame, Box::new(crate::mail_node::MailNode::new(view)), cx);
             }
             NodeKind::Kanban | NodeKind::Automations => {
                 let kind = if frame.kind == NodeKind::Kanban { DockKind::Kanban } else { DockKind::Automations };
@@ -3886,10 +3670,6 @@ impl Render for CanvasView {
     }
 }
 
-pub(crate) fn no_send_exports() -> Vec<(String, String)> {
-    vec![(superzed_sources::gmail::NO_SEND_ENV.to_string(), "1".to_string())]
-}
-
 /// Titoli di default salvati prima dell'interfaccia in inglese: si mostrano in inglese
 /// (un titolo scelto dall'utente resta com'e').
 fn legacy_title(kind: NodeKind, title: &str) -> &str {
@@ -4162,27 +3942,6 @@ mod tests {
             assert!(c.model().frame(other).is_none());
         });
         assert!(closed.get());
-    }
-
-    #[gpui::test]
-    async fn a_chat_opened_from_the_mail_cannot_send(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        canvas.update_in(cx, |c, window, cx| {
-            c.test_claude_pty = Some(zsh_spec());
-            c.new_claude_in_kanban_without_send("Leggi questo thread".into(), window, cx);
-        });
-        cx.run_until_parked();
-        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
-        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
-        canvas.update_in(cx, |c, window, cx| {
-            c.new_claude_in_kanban_with_prompt(Some("altro".into()), window, cx);
-        });
-        cx.run_until_parked();
-        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
-        assert!(!command.contains("GOG_GMAIL_NO_SEND"), "{command}");
-        close_all(&canvas, cx);
     }
 
     #[gpui::test]
@@ -5228,71 +4987,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_mail_node_exists_once_and_survives_close(cx: &mut TestAppContext) {
-        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        let mail = canvas.read_with(cx, |c, _| c.mail_node()).expect("nodo Posta creato al caricamento");
-        let again = canvas.update_in(cx, |c, window, cx| c.ensure_mail_node(window, cx));
-        assert_eq!(mail, again);
-        let note = canvas.update_in(cx, |c, window, cx| c.new_note(window, cx));
-        // selezione di tutto + chiusura: la nota va, il nodo Posta resta
-        canvas.update_in(cx, |c, window, cx| {
-            c.model.select(note, false);
-            c.model.select(mail, true);
-            let targets = c.target_nodes(window, cx);
-            c.close_nodes_with_confirm(targets, window, cx);
-        });
-        cx.run_until_parked();
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        canvas.read_with(cx, |c, _| {
-            assert!(c.model.frame(note).is_none(), "la nota si chiude");
-            assert!(c.model.frame(mail).is_some(), "il nodo Posta resta");
-        });
-    }
-
-    #[gpui::test]
-    async fn closing_only_the_mail_node_asks_nothing(cx: &mut TestAppContext) {
-        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        let mail = canvas.read_with(cx, |c, _| c.mail_node()).unwrap();
-        canvas.update_in(cx, |c, window, cx| c.close_nodes_with_confirm(vec![mail], window, cx));
-        cx.run_until_parked();
-        assert!(canvas.read_with(cx, |c, _| c.model.frame(mail).is_some()));
-    }
-
-    #[gpui::test]
-    async fn mail_settings_are_saved_and_restored(cx: &mut TestAppContext) {
-        // gog finto: senza ConnectionStore il nodo userebbe il gog vero
-        let (_store, _dir) = with_sources(cx, superzed_sources::test_support::gmail_runner(), github_connections());
-        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
-        view.update_in(cx, |v, window, cx| {
-            v.account_editor().update(cx, |e, cx| e.set_text("j.doe@example.com", window, cx));
-            v.query_editor().update(cx, |e, cx| e.set_text("from:@acme.example", window, cx));
-            v.apply_settings(cx);
-        });
-        cx.executor().advance_clock(SAVE_DEBOUNCE);
-        cx.run_until_parked();
-        let saved = parse_project_file(&fs.load(Path::new("/repo/.superzed/project.json")).await.unwrap()).unwrap();
-        let record = saved.nodes.iter().find(|n| n.kind == NodeKind::Mail).expect("nodo Posta salvato");
-        assert_eq!(record.data, json!({"account": "j.doe@example.com", "query": "from:@acme.example"}));
-        // canvas svuotato: le impostazioni possono venire solo dal file
-        canvas.update_in(cx, |c, window, cx| {
-            let all: Vec<NodeId> = c.model.frames().iter().map(|f| f.id).collect();
-            c.remove_nodes(&all, cx);
-            c.persist.as_mut().unwrap().loaded = false;
-            c.finish_load(LoadOutcome::Loaded(saved.clone()), window, cx);
-        });
-        cx.run_until_parked();
-        let mails = canvas.read_with(cx, |c, _| c.model.frames().iter().filter(|f| f.kind == NodeKind::Mail).count());
-        assert_eq!(mails, 1, "il nodo del file, nessun altro");
-        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
-        assert_eq!(view.read_with(cx, |v, _| v.settings()), ("j.doe@example.com".into(), "from:@acme.example".into()));
-    }
-
-    #[gpui::test]
     async fn automations_move_down_when_the_kanban_grows_into_them(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
@@ -6145,155 +5839,6 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(canvas.read_with(cx, |c, cx| c.docked_chats(cx).len()), 1);
         close_all(&canvas, cx);
-    }
-
-    fn configure_mail(canvas: &Entity<CanvasView>, cx: &mut VisualTestContext) {
-        let view = canvas.read_with(cx, |c, _| c.mail_view()).unwrap();
-        view.update_in(cx, |v, window, cx| {
-            v.account_editor().update(cx, |e, cx| e.set_text("j.doe@example.com", window, cx));
-            v.query_editor().update(cx, |e, cx| e.set_text("from:@acme.example", window, cx));
-            v.apply_settings(cx);
-        });
-        cx.run_until_parked();
-    }
-
-    fn open_mail_prompt_for_test(canvas: &Entity<CanvasView>, cx: &mut VisualTestContext) {
-        let placeholders =
-            crate::prompt_picker::Placeholders { project_dir: Some("/repo".into()), notifications_dir: "/n".into(), mail_file: None };
-        canvas.update_in(cx, |c, window, cx| {
-            c.test_claude_pty = Some(zsh_spec());
-            c.open_mail_prompt("Leggi {mail_file}".into(), true, placeholders, false, window, cx);
-        });
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    async fn the_mail_prompt_writes_the_inbox_and_opens_a_no_send_chat(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let runner = superzed_sources::test_support::gmail_runner();
-        // il secondo thread della ricerca finta: senza, la sua lettura fallirebbe
-        runner.on(
-            "gmail thread get t-100",
-            superzed_sources::test_support::ok(
-                r#"{"thread":{"id":"t-100","messages":[{"id":"m-101","headers":{"subject":"Atlas: listini"},"body":"x"}]}}"#,
-            ),
-        );
-        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
-        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        configure_mail(&canvas, cx);
-        open_mail_prompt_for_test(&canvas, cx);
-        let inbox = fs.load(Path::new("/repo/.superzed/mail/inbox.json")).await.unwrap();
-        assert!(inbox.contains("\"thread_id\": \"t-200\""), "{inbox}");
-        assert!(inbox.contains("\"truncated\": false"), "{inbox}");
-        assert!(fs.load(Path::new("/repo/.superzed/mail/state.json")).await.unwrap().contains("last_check"));
-        assert_eq!(fs.load(Path::new("/repo/.superzed/mail/.gitignore")).await.unwrap(), "*\n");
-        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
-        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
-        assert!(command.contains("/repo/.superzed/mail/inbox.json"), "{command}");
-        // la ricerca del prompt (max 30), non quella del nodo (max 50)
-        let search = runner.calls().into_iter().find(|c| c.line().contains("gmail search --max 30 --")).unwrap();
-        assert!(search.args.last().unwrap().starts_with("(from:@acme.example) after:"));
-        close_all(&canvas, cx);
-    }
-
-    #[gpui::test]
-    async fn the_mail_analysis_prompt_carries_the_filter_into_a_no_send_chat(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let runner = superzed_sources::test_support::gmail_runner();
-        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
-        let (_ws, canvas, _fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        let placeholders =
-            crate::prompt_picker::Placeholders { project_dir: Some("/repo".into()), notifications_dir: "/n".into(), mail_file: None };
-        let body = crate::prompt_picker::MAIL_ANALYSIS_PROMPT.to_string();
-        canvas.update_in(cx, |c, window, cx| {
-            c.test_claude_pty = Some(zsh_spec());
-            c.open_mail_settings_prompt(body.clone(), false, placeholders.clone(), false, window, cx);
-        });
-        cx.run_until_parked();
-        assert!(canvas.read_with(cx, |c, _| c.last_claude_command().is_none()), "senza account e filtro nessuna chat");
-        assert!(canvas.read_with(cx, |c, _| c.last_warning.clone()).is_some_and(|w| w.contains("mail node")));
-
-        configure_mail(&canvas, cx);
-        let searches_before = runner.count("gmail search");
-        canvas.update_in(cx, |c, window, cx| c.open_mail_settings_prompt(body, false, placeholders, false, window, cx));
-        cx.run_until_parked();
-        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
-        assert!(command.starts_with("export GOG_GMAIL_NO_SEND="), "{command}");
-        assert!(command.contains("gog --account j.doe@example.com --readonly"), "{command}");
-        assert!(command.contains("(from:@acme.example)"), "{command}");
-        assert_eq!(runner.count("gmail search"), searches_before, "la ricerca la fa la chat");
-        close_all(&canvas, cx);
-    }
-
-    #[gpui::test]
-    async fn an_unreadable_thread_is_skipped_and_listed_in_the_inbox(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let runner = superzed_sources::test_support::gmail_runner();
-        runner.on("gmail thread get t-100", superzed_sources::test_support::fail(1, "boom"));
-        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
-        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        configure_mail(&canvas, cx);
-        open_mail_prompt_for_test(&canvas, cx);
-        let inbox: serde_json::Value =
-            serde_json::from_str(&fs.load(Path::new("/repo/.superzed/mail/inbox.json")).await.unwrap()).unwrap();
-        let threads: Vec<&str> =
-            inbox["threads"].as_array().unwrap().iter().map(|thread| thread["thread_id"].as_str().unwrap()).collect();
-        assert_eq!(threads, ["t-200"]);
-        assert_eq!(inbox["errors"], json!([{"thread_id": "t-100", "error": "gog: boom"}]));
-        assert!(fs.load(Path::new("/repo/.superzed/mail/state.json")).await.unwrap().contains("last_check"));
-        let command = canvas.read_with(cx, |c, _| c.last_claude_command().map(str::to_string)).unwrap();
-        assert!(command.contains("/repo/.superzed/mail/inbox.json"), "{command}");
-        close_all(&canvas, cx);
-    }
-
-    #[gpui::test]
-    async fn a_failed_search_does_not_move_the_last_check(cx: &mut TestAppContext) {
-        let runner = superzed_sources::test_support::gmail_runner();
-        // solo la ricerca del prompt (max 30) fallisce, quella del nodo (max 50) no
-        runner.on("gmail search --max 30 --", superzed_sources::test_support::fail(8, "backend error"));
-        let (_store, _dir) = with_sources(cx, runner.clone(), json!({"version": 1, "connections": []}));
-        let (_ws, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        cx.run_until_parked();
-        configure_mail(&canvas, cx);
-        open_mail_prompt_for_test(&canvas, cx);
-        assert!(!fs.is_file(Path::new("/repo/.superzed/mail/state.json")).await);
-        assert!(canvas.read_with(cx, |c, _| c.last_claude_command().is_none()), "nessuna chat senza inbox");
-        assert!(canvas.read_with(cx, |c, _| c.last_warning.clone()).is_some_and(|w| w.starts_with("Mail prompt:")));
-    }
-
-    // il prompt della posta compare con il nodo Posta anche non configurato; un file del
-    // progetto con lo stesso nome lo sostituisce
-    #[gpui::test]
-    async fn the_mail_prompt_is_listed_with_the_mail_node_and_a_project_file_replaces_it(cx: &mut TestAppContext) {
-        let (workspace, canvas, fs, cx) = crate::test_support::workspace_with_repo_opts(cx, json!({}), true).await;
-        fs.insert_tree("/data/prompts", json!({})).await;
-        cx.update(|_, cx| {
-            cx.set_global(crate::prompt_picker::PromptLibraryDirs { global: PathBuf::from("/data/prompts") });
-            menu::init();
-            cx.bind_keys([gpui::KeyBinding::new("escape", menu::Cancel, None)]);
-        });
-        assert!(canvas.read_with(cx, |c, _| c.mail_view()).is_some_and(|view| view.read_with(cx, |v, _| v.settings().0.is_empty())));
-        canvas.update_in(cx, |c, window, cx| window.focus(&c.focus_handle, cx));
-        cx.dispatch_action(superzed_actions::NewClaudeNodeFromPrompt);
-        cx.run_until_parked();
-        let modal = workspace
-            .read_with(cx, |ws, cx| ws.active_modal::<crate::prompt_picker::PromptPickerModal>(cx))
-            .expect("picker aperto con il solo prompt integrato");
-        assert_eq!(modal.read_with(cx, |m, _| m.selected_name().to_string()), crate::prompt_picker::MAIL_PROMPT_NAME);
-        assert!(cx.debug_bounds("superzed-prompt-row-built-in-Email del progetto").is_some());
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-
-        fs.insert_tree("/repo/.superzed/prompts", json!({ "posta.md": "---\nname: Email del progetto\n---\nCorpo locale" })).await;
-        canvas.update_in(cx, |c, window, cx| window.focus(&c.focus_handle, cx));
-        cx.dispatch_action(superzed_actions::NewClaudeNodeFromPrompt);
-        cx.run_until_parked();
-        assert!(workspace.read_with(cx, |ws, cx| ws.active_modal::<crate::prompt_picker::PromptPickerModal>(cx)).is_some());
-        assert!(cx.debug_bounds("superzed-prompt-row-project-Email del progetto").is_some());
-        assert!(cx.debug_bounds("superzed-prompt-row-built-in-Email del progetto").is_none());
     }
 
     #[gpui::test]

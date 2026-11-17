@@ -21,8 +21,6 @@ pub enum NodeKind {
     Automations,
     /// Pannello di una fonte (GitHub, HyperDX, Zabbix): `source_node`.
     Source,
-    /// Posta del progetto (Gmail via gog): `mail_node`, uno per progetto, non chiudibile.
-    Mail,
 }
 
 impl NodeKind {

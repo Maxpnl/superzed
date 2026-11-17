@@ -56,6 +56,12 @@ fn is_foreign_node(value: &serde_json::Value) -> bool {
             .is_some_and(|k| !known(k))
 }
 
+/// Il nodo Posta (Gmail) non esiste piu': tenerlo fra i `foreign_nodes` mostrerebbe a ogni
+/// apertura l'avviso dei nodi di tipo sconosciuto, quindi si scarta al caricamento.
+fn is_removed_node(value: &serde_json::Value) -> bool {
+    value.get("kind").and_then(|k| k.as_str()) == Some("mail")
+}
+
 impl TryFrom<RawProjectFile> for ProjectFile {
     type Error = String;
 
@@ -63,6 +69,9 @@ impl TryFrom<RawProjectFile> for ProjectFile {
         let mut nodes = Vec::new();
         let mut foreign_nodes = Vec::new();
         for (ix, value) in raw.nodes.into_iter().enumerate() {
+            if is_removed_node(&value) {
+                continue;
+            }
             match serde_json::from_value::<NodeRecord>(value.clone()) {
                 Ok(record) => nodes.push(record),
                 Err(_) if is_foreign_node(&value) => foreign_nodes.push(value),
@@ -332,6 +341,17 @@ mod tests {
         // senza id o con un tipo non stringa resta un errore (file rovinato, non una versione futura)
         assert!(parse_project_file(r#"{"version":1,"nodes":[{"kind":"lavagna"}]}"#).is_err());
         assert!(parse_project_file(r#"{"version":1,"nodes":[{"id":1,"kind":"note"}]}"#).is_err(), "tipo noto ma record rotto");
+    }
+
+    #[test]
+    fn a_saved_mail_node_is_dropped() {
+        let text = r#"{"version":1,"nodes":[
+            {"id":5,"kind":"note","origin":[0,0],"size":[300,200],"title":"n","data":{"text":"ciao"}},
+            {"id":7,"kind":"mail","origin":[1,2],"size":[10,10],"title":"Mail","data":{"account":"j.doe@example.com"}}]}"#;
+        let file = parse_project_file(text).unwrap();
+        assert_eq!(file.nodes.len(), 1);
+        assert!(file.foreign_nodes.is_empty());
+        assert!(!serde_json::to_string(&file).unwrap().contains("mail"));
     }
 
     #[test]
