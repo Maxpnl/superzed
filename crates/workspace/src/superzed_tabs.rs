@@ -13,7 +13,9 @@ use superzed_actions::{
 use ui::{IconButton, IconName, IconSize, Label, LabelSize, Tooltip, prelude::*};
 use util::ResultExt as _;
 
-pub const TAB_COLORS: u8 = 8;
+/// I colori "player" del tema danno solo sette tinte distinte, troppo poche per
+/// distinguere molti progetti: la palette e' generata (`project_color`).
+pub const TAB_COLORS: u8 = 30;
 
 pub struct ProjectTab {
     pub key: Option<ProjectGroupKey>,
@@ -378,8 +380,50 @@ impl gpui::Render for DraggedProjectTab {
     }
 }
 
-fn tab_color(ix: Option<u8>, cx: &App) -> Option<gpui::Hsla> {
-    ix.map(|i| cx.theme().players().color_for_participant(u32::from(i % TAB_COLORS)).cursor)
+/// Colore `ix` della palette dei progetti. Le tinte avanzano per sezione aurea, cosi'
+/// i primi colori sono i piu' lontani fra loro; ogni giro di dieci cambia luminosita'
+/// per separare le tinte vicine dei giri successivi.
+pub fn project_color(ix: u8, cx: &App) -> gpui::Hsla {
+    let ix = ix % TAB_COLORS;
+    let hue = (0.02 + f32::from(ix) * 0.618_034).fract();
+    let light_theme = cx.theme().appearance().is_light();
+    let (saturation, lightness) = match (ix / 10, light_theme) {
+        (0, false) => (0.70, 0.62),
+        (1, false) => (0.55, 0.76),
+        (_, false) => (0.80, 0.48),
+        (0, true) => (0.70, 0.45),
+        (1, true) => (0.60, 0.32),
+        (_, true) => (0.80, 0.58),
+    };
+    gpui::hsla(hue, saturation, lightness, 1.)
+}
+
+/// Un colore per progetto: le tab colorate tengono il loro (un colore salvato gia'
+/// preso da una tab precedente conta come assente), le altre prendono in ordine i
+/// colori non ancora usati; finiti quelli, si riparte dall'indice della tab.
+pub fn project_colors(tab_colors: &[Option<u8>]) -> Vec<u8> {
+    let mut used: Vec<u8> = Vec::new();
+    let explicit: Vec<Option<u8>> = tab_colors
+        .iter()
+        .map(|color| {
+            let color = color.map(|c| c % TAB_COLORS).filter(|c| !used.contains(c));
+            used.extend(color);
+            color
+        })
+        .collect();
+    explicit
+        .iter()
+        .enumerate()
+        .map(|(ix, color)| {
+            color.unwrap_or_else(|| {
+                let free = (0..TAB_COLORS)
+                    .find(|c| !used.contains(c))
+                    .unwrap_or((ix % usize::from(TAB_COLORS)) as u8);
+                used.push(free);
+                free
+            })
+        })
+        .collect()
 }
 
 pub fn render_project_tabs(
@@ -388,13 +432,15 @@ pub fn render_project_tabs(
     cx: &mut App,
 ) -> AnyElement {
     let tabs = project_tabs(mw.read(cx), cx);
+    let resolved = project_colors(&tabs.iter().map(|tab| tab.color).collect::<Vec<_>>());
     let colors = cx.theme().colors();
-    let items = tabs.into_iter().enumerate().map(|(ix, tab)| {
+    let items = tabs.into_iter().zip(resolved).enumerate().map(|(ix, (tab, resolved))| {
         let activate = mw.downgrade();
         let close_mw = mw.clone();
         let middle_mw = mw.clone();
         let drop_mw = mw.downgrade();
-        let dot = tab_color(tab.color, cx);
+        // stesso colore della vista Sessioni: un doppione salvato mostra quello assegnato
+        let dot = tab.color.map(|_| project_color(resolved, cx));
         let attention = tab.workspace.as_ref().map_or(TabAttention::None, |ws| tab_attention(ws, cx));
         let tab_element = div()
             .id(("superzed-project-tab", ix))
@@ -757,6 +803,28 @@ mod tests {
         cx.update(|_, cx| cycle_tab_color_at(&mw, 1, cx));
         cx.update(|_, cx| cycle_tab_color_at(&mw, 2, cx));
         assert_eq!(colors(cx), vec![Some(2), Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn every_project_gets_its_own_color() {
+        assert_eq!(project_colors(&[None, Some(0), None, Some(2)]), vec![1, 0, 3, 2]);
+        assert_eq!(project_colors(&[Some(5), Some(5), None]), vec![5, 0, 1], "il doppione salvato ne prende uno libero");
+        let all: Vec<Option<u8>> = (0..TAB_COLORS).map(Some).chain([None]).collect();
+        assert_eq!(project_colors(&all).last(), Some(&0), "finiti i colori, l'indice della tab");
+    }
+
+    #[gpui::test]
+    fn palette_colors_are_all_different(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let mut seen: Vec<(i32, i32, i32)> = Vec::new();
+            for ix in 0..TAB_COLORS {
+                let color = project_color(ix, cx);
+                let key = ((color.h * 360.) as i32, (color.s * 100.) as i32, (color.l * 100.) as i32);
+                assert!(!seen.contains(&key), "colore {ix} ripetuto");
+                seen.push(key);
+            }
+        });
     }
 
     #[gpui::test]

@@ -16,7 +16,7 @@ use ui::{ContextMenu, Disclosure, Icon, IconButton, IconName, IconSize, KeyBindi
 use workspace::{
     MultiWorkspace, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
-    superzed_tabs::{TAB_COLORS, project_tabs},
+    superzed_tabs::{project_color, project_colors, project_tabs},
 };
 
 /// Riga della vista Sessioni: un nodo terminale del canvas di un progetto, con
@@ -217,28 +217,6 @@ impl SessionsPanel {
         groups.sort_by_key(|g| !g.is_active); // stabile: il resto resta nell'ordine delle tab
         groups
     }
-}
-
-/// Un colore per progetto: le tab colorate tengono il loro, le altre prendono in ordine
-/// i colori non ancora usati; finiti quelli, si riparte dall'indice della tab.
-fn project_colors(tab_colors: &[Option<u8>]) -> Vec<u8> {
-    let mut used: Vec<u8> = tab_colors.iter().flatten().copied().collect();
-    tab_colors
-        .iter()
-        .enumerate()
-        .map(|(ix, color)| {
-            color.unwrap_or_else(|| {
-                let free = (0..TAB_COLORS).find(|c| !used.contains(c)).unwrap_or((ix % usize::from(TAB_COLORS)) as u8);
-                used.push(free);
-                free
-            })
-        })
-        .collect()
-}
-
-/// Stessa tinta del pallino della tab di progetto.
-fn project_color(color: u8, cx: &App) -> gpui::Hsla {
-    cx.theme().players().color_for_participant(u32::from(color % TAB_COLORS)).cursor
 }
 
 /// Ramo git del repository attivo del progetto del workspace.
@@ -1066,13 +1044,6 @@ mod tests {
             "la cartella doppia conta una volta"
         );
         assert!(exclusion_entries(&account, &[], home).is_empty());
-    }
-
-    #[test]
-    fn every_project_gets_a_color_and_uncolored_ones_avoid_the_chosen_ones() {
-        assert_eq!(project_colors(&[None, Some(0), None, Some(2)]), vec![1, 0, 3, 2]);
-        let all: Vec<Option<u8>> = (0..TAB_COLORS).map(Some).chain([None]).collect();
-        assert_eq!(project_colors(&all).last(), Some(&0), "finiti i colori, l'indice della tab");
     }
 
     fn row(node: u64, kind: NodeKind, title: &str, account: Option<&str>, model: Option<&str>) -> SessionRow {
