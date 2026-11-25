@@ -16,6 +16,8 @@ pub const HOOK_EVENTS: &[&str] = &[
     "Stop",
     "StopFailure",
     "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 const HOOK_SH: &str = r#"#!/bin/sh
@@ -215,7 +217,7 @@ mod tests {
             assert_eq!(cmd, "sh '/data/claude/hook.sh' hook", "{event}");
             assert_eq!(v["hooks"][event][0]["hooks"][0]["type"], "command");
         }
-        assert_eq!(HOOK_EVENTS.len(), 11);
+        assert_eq!(HOOK_EVENTS.len(), 13);
         assert_eq!(v["statusLine"]["type"], "command");
         assert_eq!(v["statusLine"]["command"], "sh '/data/claude/statusline.sh'");
     }

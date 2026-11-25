@@ -253,9 +253,12 @@ pub fn waiting_count(rows: &[SessionRow]) -> usize {
 }
 
 /// Colore del pallino di stato di una riga (senza sessione: terminale, attenuato).
-pub fn status_dot_color(state: Option<&SessionState>) -> Color {
+/// Colore del pallino di stato. `Working` e' il ciano dei nodi al lavoro; `scheduled` (chat
+/// ferma con cron o wakeup in attesa, `Session::waiting_on_schedule`) fa verde una chat ferma.
+pub fn status_dot_color(state: Option<&SessionState>, scheduled: bool, cx: &App) -> Color {
     match state {
-        Some(SessionState::Working) => Color::Success,
+        Some(SessionState::Working) => Color::Custom(superzed_sessions::ui::working_color(cx)),
+        Some(SessionState::Idle) if scheduled => Color::Custom(superzed_sessions::ui::scheduled_color(cx)),
         Some(SessionState::NeedsInput(_) | SessionState::Done) => Color::Warning,
         Some(SessionState::Failed(_)) => Color::Error,
         Some(SessionState::Ended) => Color::Disabled,
@@ -493,10 +496,14 @@ impl SessionsPanel {
         let session = row.session.as_ref();
         // pallino di stato, col tooltip dell'icona di stato del nodo
         let state = session.map(|s| &s.state);
-        let dot = status_dot(status_dot_color(state), cx)
+        let scheduled = session.is_some_and(|s| s.waiting_on_schedule());
+        let dot = status_dot(status_dot_color(state, scheduled, cx), cx)
             .id(("superzed-session-status", status_id))
             .debug_selector(move || format!("superzed-session-status-{status_id}"))
-            .when_some(state.and_then(superzed_sessions::ui::status_tooltip), |d, tip| d.tooltip(Tooltip::text(tip)));
+            .when_some(
+                session.and_then(|s| superzed_sessions::ui::session_tooltip(s, superzed_sessions::now_unix_ms())),
+                |d, tip| d.tooltip(Tooltip::text(tip)),
+            );
         let kind = div().flex_none().size(rems(0.625)).rounded_sm().bg(project_color(color, cx));
         let uncommitted = (!row.uncommitted.is_empty()).then(|| {
             let tip = row.uncommitted.iter().map(|f| f.display.as_str()).collect::<Vec<_>>().join("\n");
@@ -508,6 +515,17 @@ impl SessionsPanel {
                 .tooltip(Tooltip::text(tip))
                 .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall).color(Color::Modified))
                 .child(Label::new(row.uncommitted.len().to_string()).size(LabelSize::Small).color(Color::Modified))
+        });
+        let subagents = session.map_or(0, |s| s.active_subagents.len());
+        let subagents = (subagents > 0).then(|| {
+            superzed_sessions::ui::count_chip(
+                IconName::UserGroup,
+                subagents,
+                Color::Custom(superzed_sessions::ui::working_color(cx)),
+            )
+            .id(("superzed-session-subagents", status_id))
+            .debug_selector(move || format!("superzed-session-subagents-{status_id}"))
+            .tooltip(Tooltip::text(superzed_sessions::ui::subagents_text(subagents)))
         });
         let golden = row.golden;
         let star = golden.then(|| {
@@ -583,6 +601,7 @@ impl SessionsPanel {
                             .child(Label::new(title).truncate()),
                     )
                     .children(uncommitted)
+                    .children(subagents)
                     .children(account)
                     .children(ctx)
                     .children(close),
@@ -595,6 +614,10 @@ impl SessionsPanel {
             .on_click(move |_, window, cx| focus_session(&mw, tab_ix, ws.clone(), node, window, cx));
         let attention = state.map_or(superzed_sessions::Attention::None, superzed_sessions::attention);
         let tint = match attention {
+            // ferma con cron in attesa: verde tenue, sotto l'avviso ambra
+            superzed_sessions::Attention::None if scheduled => {
+                return row_element.bg(superzed_sessions::ui::scheduled_color(cx).opacity(0.08)).into_any_element();
+            }
             superzed_sessions::Attention::None => return row_element.into_any_element(),
             superzed_sessions::Attention::NeedsInput => status.warning,
             superzed_sessions::Attention::Done => colors.terminal_ansi_yellow,
@@ -1110,16 +1133,26 @@ mod tests {
         assert_eq!(waiting_count(&rows[2..]), 0);
     }
 
-    #[test]
-    fn dot_colors_follow_the_state() {
-        assert_eq!(status_dot_color(Some(&SessionState::Working)), Color::Success);
-        assert_eq!(status_dot_color(Some(&SessionState::NeedsInput(InputKind::Other))), Color::Warning);
-        assert_eq!(status_dot_color(Some(&SessionState::Failed("x".into()))), Color::Error);
-        assert_eq!(status_dot_color(Some(&SessionState::Idle)), Color::Muted);
-        assert_eq!(status_dot_color(Some(&SessionState::Starting)), Color::Muted);
-        assert_eq!(status_dot_color(Some(&SessionState::Done)), Color::Warning);
-        assert_eq!(status_dot_color(Some(&SessionState::Ended)), Color::Disabled);
-        assert_eq!(status_dot_color(None), Color::Muted, "terminale");
+    #[gpui::test]
+    fn dot_colors_follow_the_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            let dot = |state: SessionState, scheduled: bool| status_dot_color(Some(&state), scheduled, cx);
+            let cyan = Color::Custom(superzed_sessions::ui::working_color(cx));
+            let green = Color::Custom(superzed_sessions::ui::scheduled_color(cx));
+            assert_eq!(dot(SessionState::Working, false), cyan, "come il bordo dei nodi al lavoro");
+            assert_eq!(dot(SessionState::Working, true), cyan, "al lavoro vince il ciano");
+            assert_eq!(dot(SessionState::NeedsInput(InputKind::Other), true), Color::Warning);
+            assert_eq!(dot(SessionState::Failed("x".into()), false), Color::Error);
+            assert_eq!(dot(SessionState::Idle, false), Color::Muted);
+            assert_eq!(dot(SessionState::Idle, true), green, "ferma con cron in attesa");
+            assert_eq!(dot(SessionState::Starting, false), Color::Muted);
+            assert_eq!(dot(SessionState::Done, true), Color::Warning, "l'avviso di Done vince sul verde");
+            assert_eq!(dot(SessionState::Ended, false), Color::Disabled);
+            assert_eq!(status_dot_color(None, false, cx), Color::Muted, "terminale");
+        });
     }
 
     #[test]
@@ -1138,11 +1171,6 @@ mod tests {
         assert_eq!(row_subtitle(chat.kind, chat.session.as_ref(), false), "Brainstorm");
         assert_eq!(row_subtitle(NodeKind::Claude, None, false), "New", "chat che sta partendo");
         assert_eq!(row_subtitle(NodeKind::Shell, None, false), "Terminal");
-    }
-
-    #[test]
-    fn done_dot_is_amber_like_needs_input() {
-        assert_eq!(status_dot_color(Some(&SessionState::Done)), Color::Warning);
     }
 
     #[test]

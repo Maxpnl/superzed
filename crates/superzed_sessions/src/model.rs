@@ -69,10 +69,32 @@ pub struct Session {
     /// chat principale: finche' non e' zero la chat resta `Working`, perche' claude si
     /// risveglia da solo quando finiscono. Torna a zero appena la chat principale riparte.
     pub background_tasks: usize,
+    /// Subagent partiti (`SubagentStart`) e non ancora finiti (`SubagentStop`), per `agent_id`.
+    pub active_subagents: std::collections::BTreeSet<String>,
+    /// Cron (`CronCreate`) e wakeup di `/loop` (`ScheduleWakeup`) che claude fara' scattare da
+    /// solo. Solo in memoria: in Claude Code muoiono con il processo.
+    pub scheduled: Vec<ScheduledTask>,
     /// Quando la chat e' nata e quando claude ha finito di rispondere l'ultima volta:
     /// nel `data` del nodo, cosi' sopravvivono al riavvio.
     pub times: SessionTimes,
 }
+
+/// Un cron o un wakeup in attesa. Tempi in millisecondi unix, come `nextFireAt` di `CronCreate`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledTask {
+    pub id: String,
+    /// Prossima esecuzione annunciata da claude; di un ricorrente vale solo la prima.
+    pub next_fire_ms: Option<i64>,
+    /// Da qui in poi non conta piu': claude non avvisa quando un one-shot scatta e si cancella.
+    pub expires_ms: i64,
+}
+
+/// Id di `ScheduledTask` per il wakeup di `/loop`: ce n'e' al massimo uno, il nuovo sostituisce il vecchio.
+pub const WAKEUP_ID: &str = "wakeup";
+/// Un one-shot puo' scattare un po' in ritardo (claude lo lancia solo al prompt libero).
+const FIRE_GRACE_MS: i64 = 2 * 60 * 1000;
+/// Scadenza dei cron ricorrenti di Claude Code quando `maxAgeMs` manca.
+const RECURRING_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Secondi unix (orologio di sistema, non `Instant`: si salvano e si confrontano col
 /// calendario). `None` = mai visto.
@@ -118,6 +140,13 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+pub fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 impl Session {
     pub fn set_state(&mut self, state: SessionState) {
         if self.state != state {
@@ -138,6 +167,24 @@ impl Session {
         seen_working || replied
     }
 
+    /// Toglie cron e wakeup scaduti; `true` se ne ha tolto qualcuno.
+    pub fn prune_scheduled(&mut self, now_ms: i64) -> bool {
+        let before = self.scheduled.len();
+        self.scheduled.retain(|task| task.expires_ms > now_ms);
+        self.scheduled.len() != before
+    }
+
+    /// Prima esecuzione nota ancora nel futuro, fra tutti i cron e wakeup.
+    pub fn next_scheduled_fire(&self, now_ms: i64) -> Option<i64> {
+        self.scheduled.iter().filter_map(|task| task.next_fire_ms).filter(|at| *at > now_ms).min()
+    }
+
+    /// Ferma (non al lavoro e non in attesa dell'utente) con cron o wakeup in attesa: il verde
+    /// di nodo e riga. Lo stato non cambia, e' solo come la si mostra.
+    pub fn waiting_on_schedule(&self) -> bool {
+        !self.scheduled.is_empty() && matches!(self.state, SessionState::Idle | SessionState::Done)
+    }
+
     pub fn new(account: String, session_id: Option<String>) -> Self {
         Self {
             session_id,
@@ -153,6 +200,8 @@ impl Session {
             state_changed_at: std::time::Instant::now(),
             touched_files: Default::default(),
             background_tasks: 0,
+            active_subagents: Default::default(),
+            scheduled: Vec::new(),
             times: SessionTimes::default(),
         }
     }
@@ -235,6 +284,51 @@ fn record_touched_file(session: &mut Session, payload: &serde_json::Value) {
     session.touched_files.insert(path);
 }
 
+fn record_scheduled(session: &mut Session, payload: &serde_json::Value, now_ms: i64) {
+    let input = payload.get("tool_input");
+    match str_field(payload, "tool_name") {
+        Some("CronCreate") => {
+            let Some(response) = payload.get("tool_response") else {
+                return;
+            };
+            let Some(id) = str_field(response, "id") else {
+                return;
+            };
+            let recurring = response.get("recurring").and_then(|v| v.as_bool()).unwrap_or(true);
+            let next_fire_ms = response.get("nextFireAt").and_then(|v| v.as_i64());
+            let max_age = response.get("maxAgeMs").and_then(|v| v.as_i64()).unwrap_or(RECURRING_MAX_AGE_MS);
+            let expires_ms = match next_fire_ms {
+                Some(at) if !recurring => at + FIRE_GRACE_MS,
+                _ => now_ms + max_age,
+            };
+            session.scheduled.retain(|task| task.id != id);
+            session.scheduled.push(ScheduledTask { id: id.to_string(), next_fire_ms, expires_ms });
+        }
+        Some("CronDelete") => {
+            if let Some(id) = input.and_then(|input| str_field(input, "id")) {
+                session.scheduled.retain(|task| task.id != id);
+            }
+        }
+        Some("ScheduleWakeup") => {
+            session.scheduled.retain(|task| task.id != WAKEUP_ID);
+            if input.and_then(|input| input.get("stop")).and_then(|v| v.as_bool()) == Some(true) {
+                return;
+            }
+            let Some(delay) = input.and_then(|input| input.get("delaySeconds")).and_then(|v| v.as_f64()) else {
+                return;
+            };
+            // Claude Code limita il ritardo a [60, 3600] secondi
+            let at = now_ms + (delay.clamp(60., 3600.) * 1000.) as i64;
+            session.scheduled.push(ScheduledTask {
+                id: WAKEUP_ID.to_string(),
+                next_fire_ms: Some(at),
+                expires_ms: at + FIRE_GRACE_MS,
+            });
+        }
+        _ => {}
+    }
+}
+
 fn str_field<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(|v| v.as_str())
 }
@@ -283,7 +377,20 @@ pub fn apply_hook(session: &mut Session, payload: &serde_json::Value, focused: b
         "UserPromptSubmit" => Some(SessionState::Working),
         "PostToolUse" => {
             record_touched_file(session, payload);
+            record_scheduled(session, payload, now_unix_ms());
             Some(SessionState::Working)
+        }
+        "SubagentStart" => {
+            if let Some(id) = str_field(payload, "agent_id") {
+                session.active_subagents.insert(id.to_string());
+            }
+            None
+        }
+        "SubagentStop" => {
+            if let Some(id) = str_field(payload, "agent_id") {
+                session.active_subagents.remove(id);
+            }
+            None
         }
         "PreToolUse" => Some(match str_field(payload, "tool_name") {
             Some("AskUserQuestion") => SessionState::NeedsInput(InputKind::Question),
@@ -321,7 +428,14 @@ pub fn apply_hook(session: &mut Session, payload: &serde_json::Value, focused: b
             session.times.replied_at = Some(now_unix());
             Some(SessionState::Failed(str_field(payload, "error_type").unwrap_or("unknown").to_string()))
         }
-        "SessionEnd" => Some(SessionState::Ended),
+        "SessionEnd" => {
+            session.active_subagents.clear();
+            // `/clear` chiude la sessione ma non il processo, che tiene i suoi cron
+            if str_field(payload, "reason") != Some("clear") {
+                session.scheduled.clear();
+            }
+            Some(SessionState::Ended)
+        }
         _ => None,
     };
     if let Some(next) = next {
@@ -437,6 +551,91 @@ mod tests {
         let mut focused = after(&["user_prompt_submit"]);
         apply_hook(&mut focused, &stop_with(shell), true);
         assert_eq!(focused.state, SessionState::Working, "anche col focus");
+    }
+
+    #[test]
+    fn subagents_are_counted_by_agent_id() {
+        let event = |name: &str, id: &str| serde_json::json!({"hook_event_name": name, "agent_id": id, "agent_type": "general-purpose"});
+        let mut s = after(&["user_prompt_submit"]);
+        apply_hook(&mut s, &event("SubagentStart", "a1"), false);
+        apply_hook(&mut s, &event("SubagentStart", "a2"), false);
+        apply_hook(&mut s, &event("SubagentStart", "a2"), false);
+        assert_eq!(s.active_subagents.len(), 2);
+        assert_eq!(s.state, SessionState::Working, "i subagent non cambiano lo stato");
+        apply_hook(&mut s, &event("SubagentStop", "a1"), false);
+        apply_hook(&mut s, &event("SubagentStop", "unknown"), false);
+        assert_eq!(s.active_subagents.iter().collect::<Vec<_>>(), ["a2"]);
+        apply_hook(&mut s, &fx("session_end"), false);
+        assert!(s.active_subagents.is_empty(), "claude e' uscito");
+    }
+
+    fn post_tool(tool: &str, input: serde_json::Value, response: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": tool, "tool_input": input, "tool_response": response})
+    }
+
+    #[test]
+    fn cron_create_and_delete_track_scheduled_tasks() {
+        let mut s = after(&["user_prompt_submit"]);
+        let before = now_unix_ms();
+        // forma reale della risposta di CronCreate (transcript del 2026-11-25)
+        apply_hook(
+            &mut s,
+            &post_tool(
+                "CronCreate",
+                serde_json::json!({"cron": "7 */3 * * *", "prompt": "check CI"}),
+                serde_json::json!({"id": "f8b74f23", "humanSchedule": "Every 3 hours at :07", "recurring": true, "durable": false, "nextFireAt": 1_795_617_420_000_i64, "maxAgeMs": 2_592_000_000_i64}),
+            ),
+            false,
+        );
+        apply_hook(
+            &mut s,
+            &post_tool(
+                "CronCreate",
+                serde_json::json!({"cron": "17 3 31 12 *", "prompt": "remind", "recurring": false}),
+                serde_json::json!({"id": "f0e8e96b", "humanSchedule": "17 3 31 12 *", "recurring": false, "durable": false, "nextFireAt": 1_798_683_420_000_i64}),
+            ),
+            false,
+        );
+        let ids: Vec<_> = s.scheduled.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["f8b74f23", "f0e8e96b"]);
+        assert!(s.scheduled[0].expires_ms >= before + 2_592_000_000, "il ricorrente scade dopo maxAgeMs");
+        assert_eq!(s.scheduled[1].expires_ms, 1_798_683_420_000 + FIRE_GRACE_MS, "il one-shot scade dopo lo scatto");
+        assert_eq!(s.next_scheduled_fire(0), Some(1_795_617_420_000));
+        apply_hook(&mut s, &post_tool("CronDelete", serde_json::json!({"id": "f8b74f23"}), serde_json::json!({"id": "f8b74f23"})), false);
+        assert_eq!(s.scheduled.len(), 1);
+        assert!(s.prune_scheduled(1_798_683_420_000 + FIRE_GRACE_MS), "scaduto");
+        assert!(s.scheduled.is_empty());
+    }
+
+    #[test]
+    fn schedule_wakeup_keeps_one_wakeup_and_stop_removes_it() {
+        let mut s = after(&["user_prompt_submit"]);
+        let wakeup = |input: serde_json::Value| post_tool("ScheduleWakeup", input, serde_json::json!({}));
+        let before = now_unix_ms();
+        apply_hook(&mut s, &wakeup(serde_json::json!({"delaySeconds": 1200, "prompt": "go on", "reason": "r"})), false);
+        apply_hook(&mut s, &wakeup(serde_json::json!({"delaySeconds": 5, "prompt": "go on", "reason": "r"})), false);
+        assert_eq!(s.scheduled.len(), 1, "il nuovo wakeup sostituisce il vecchio");
+        let next = s.scheduled[0].next_fire_ms.unwrap();
+        assert!(next >= before + 60_000 && next < before + 1_200_000, "ritardo limitato a 60 s minimo");
+        apply_hook(&mut s, &wakeup(serde_json::json!({"stop": true})), false);
+        assert!(s.scheduled.is_empty());
+    }
+
+    #[test]
+    fn scheduled_tasks_survive_clear_but_not_exit() {
+        let cron = post_tool("CronCreate", serde_json::json!({}), serde_json::json!({"id": "c1", "recurring": true}));
+        let mut s = after(&["user_prompt_submit"]);
+        apply_hook(&mut s, &cron, false);
+        apply_hook(&mut s, &fx("stop"), true);
+        assert!(s.waiting_on_schedule(), "ferma con un cron: verde");
+        apply_hook(&mut s, &serde_json::json!({"hook_event_name": "SessionEnd", "reason": "clear"}), false);
+        apply_hook(&mut s, &fx("session_start_clear"), false);
+        assert_eq!(s.scheduled.len(), 1, "/clear non ferma il processo");
+        apply_hook(&mut s, &fx("user_prompt_submit"), false);
+        assert!(!s.waiting_on_schedule(), "al lavoro vince il ciano");
+        apply_hook(&mut s, &fx("session_end"), false);
+        assert!(s.scheduled.is_empty());
+        assert!(!s.waiting_on_schedule());
     }
 
     #[test]

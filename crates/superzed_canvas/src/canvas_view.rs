@@ -2397,12 +2397,17 @@ impl CanvasView {
         // claude al lavoro: bordo ciano e barra/sfondo appena tinti (`working_color`)
         let working = session.as_ref().is_some_and(|s| s.state == superzed_sessions::SessionState::Working);
         let work = superzed_sessions::ui::working_color(cx);
+        // ferma con cron o wakeup in attesa: verde, stessa ricetta del ciano
+        let scheduled = !needs_input && !working && session.as_ref().is_some_and(|s| s.waiting_on_schedule());
+        let schedule_color = superzed_sessions::ui::scheduled_color(cx);
         // spessore del bordo costante: la selezione e' un anello a parte (`selection_ring`)
         let golden = frame.golden;
         let border = if needs_input {
             cx.theme().status().warning
         } else if working {
             work.opacity(0.8)
+        } else if scheduled {
+            schedule_color.opacity(0.8)
         } else if golden {
             golden_color(cx)
         } else {
@@ -2412,6 +2417,8 @@ impl CanvasView {
             cx.theme().status().warning_background
         } else if working {
             colors.title_bar_background.blend(work.opacity(0.12))
+        } else if scheduled {
+            colors.title_bar_background.blend(schedule_color.opacity(0.12))
         } else if golden {
             colors.title_bar_background.blend(golden_color(cx).opacity(0.18))
         } else {
@@ -2419,8 +2426,8 @@ impl CanvasView {
         };
         let dragging = matches!(self.drag, Some(DragState::Move { .. }));
         let status = session.as_ref().and_then(|s| {
-            let icon = superzed_sessions::ui::status_icon(&s.state, cx)?;
-            let tooltip = superzed_sessions::ui::status_tooltip(&s.state, s.background_tasks);
+            let icon = superzed_sessions::ui::session_status_icon(s, cx)?;
+            let tooltip = superzed_sessions::ui::session_tooltip(s, superzed_sessions::now_unix_ms());
             Some(
                 div()
                     .id(("superzed-node-status", id))
@@ -2431,6 +2438,28 @@ impl CanvasView {
             )
         });
         let overview = self.node_overview(frame.id, cx);
+        // file non committati e subagent attivi, come nella riga delle Sessions
+        let uncommitted = session.as_ref().map_or(0, |_| self.node_uncommitted_files(frame.id, cx).len());
+        let subagents = session.as_ref().map_or(0, |s| s.active_subagents.len());
+        let counts = || {
+            let uncommitted = (uncommitted > 0).then(|| {
+                superzed_sessions::ui::count_chip(ui::IconName::GitBranch, uncommitted, Color::Modified)
+                    .id(("superzed-node-uncommitted", id))
+                    .debug_selector(move || format!("superzed-node-uncommitted-{id}"))
+                    .tooltip(ui::Tooltip::text(if uncommitted == 1 {
+                        "1 uncommitted file".to_string()
+                    } else {
+                        format!("{uncommitted} uncommitted files")
+                    }))
+            });
+            let subagents = (subagents > 0).then(|| {
+                superzed_sessions::ui::count_chip(ui::IconName::UserGroup, subagents, Color::Custom(work))
+                    .id(("superzed-node-subagents", id))
+                    .debug_selector(move || format!("superzed-node-subagents-{id}"))
+                    .tooltip(ui::Tooltip::text(superzed_sessions::ui::subagents_text(subagents)))
+            });
+            uncommitted.into_iter().chain(subagents)
+        };
         let ctx_label = |s: &superzed_sessions::Session| {
             superzed_sessions::ui::context_label(s.context_left).map(|(text, color)| {
                 div()
@@ -2454,7 +2483,7 @@ impl CanvasView {
                         Label::new(s.phase.label()).size(LabelSize::Default).color(Color::Muted)
                     });
                     let ctx = session.as_ref().and_then(ctx_label);
-                    let has_meta = phase.is_some() || ctx.is_some();
+                    let has_meta = phase.is_some() || ctx.is_some() || uncommitted > 0 || subagents > 0;
                     let now = chrono::Local::now();
                     // nata (+) a sinistra, ultima risposta (freccia) a destra, ai bordi:
                     // si distinguono dalla posizione e dall'icona, senza parole. Ogni
@@ -2523,6 +2552,13 @@ impl CanvasView {
                                                 .flex_none()
                                                 .child(superzed_sessions::ui::working_pill(cx)),
                                         )
+                                    } else if scheduled && session.as_ref().is_some_and(|s| s.state == superzed_sessions::SessionState::Idle) {
+                                        d.child(
+                                            div()
+                                                .debug_selector(move || format!("superzed-node-status-{id}"))
+                                                .flex_none()
+                                                .child(superzed_sessions::ui::scheduled_pill(cx)),
+                                        )
                                     } else {
                                         d.children(status)
                                     }
@@ -2535,6 +2571,7 @@ impl CanvasView {
                                             .max_w_full()
                                             .overflow_hidden()
                                             .gap(rems(0.5))
+                                            .children(counts())
                                             .children(phase)
                                             .children(ctx),
                                     )
@@ -2571,6 +2608,8 @@ impl CanvasView {
                     cx.theme().status().warning_background
                 } else if working {
                     colors.editor_background.blend(work.opacity(0.06))
+                } else if scheduled {
+                    colors.editor_background.blend(schedule_color.opacity(0.06))
                 } else {
                     colors.editor_background
                 })
@@ -2691,6 +2730,7 @@ impl CanvasView {
                                     )
                                 })
                         }))
+                        .children(counts())
                         .children(meta),
                 )
                 .into_any_element()

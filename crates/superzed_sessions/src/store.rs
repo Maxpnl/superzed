@@ -6,6 +6,7 @@ use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use std::path::{Path, PathBuf};
 use superzed_ipc::{Channel, IpcMessage, IpcServer};
+use util::ResultExt as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
@@ -31,6 +32,8 @@ pub struct SessionStore {
     background: HashSet<String>,
     hook_env: Option<HookEnv>,
     config_dir: PathBuf,
+    /// Timer fino al primo cron/wakeup che scade (`Session::prune_scheduled`).
+    scheduled_expiry: Option<gpui::Task<()>>,
     _server: Option<IpcServer>,
 }
 
@@ -216,6 +219,34 @@ impl SessionStore {
         if changed {
             cx.notify();
         }
+        if session.scheduled != before.scheduled {
+            self.schedule_expiry(cx);
+        }
+    }
+
+    /// Claude non avvisa quando un cron one-shot o un wakeup scatta: alla loro scadenza il
+    /// verde si spegne da solo.
+    fn schedule_expiry(&mut self, cx: &mut Context<Self>) {
+        let now = model::now_unix_ms();
+        let next = self.sessions.values().flat_map(|s| s.scheduled.iter().map(|task| task.expires_ms)).min();
+        self.scheduled_expiry = next.map(|at| {
+            let wait = std::time::Duration::from_millis(at.saturating_sub(now).max(0) as u64);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |this, cx| this.prune_scheduled(model::now_unix_ms(), cx)).log_err();
+            })
+        });
+    }
+
+    fn prune_scheduled(&mut self, now_ms: i64, cx: &mut Context<Self>) {
+        let mut pruned = false;
+        for session in self.sessions.values_mut() {
+            pruned |= session.prune_scheduled(now_ms);
+        }
+        if pruned {
+            cx.notify();
+        }
+        self.schedule_expiry(cx);
     }
 }
 
@@ -253,6 +284,7 @@ fn new_store(cx: &mut App, config_dir: PathBuf, hook_env: Option<HookEnv>, serve
         background: HashSet::default(),
         hook_env,
         config_dir,
+        scheduled_expiry: None,
         _server: server,
     });
     cx.set_global(GlobalSessionStore(store.clone()));
