@@ -784,11 +784,11 @@ mod tests {
 
     #[gpui::test]
     async fn a_notification_action_replaces_resolve_and_opens_the_review(cx: &mut TestAppContext) {
-        use superzed_done::test_support::{REPORT_JSON, SID, write_pm};
+        use superzed_done::test_support::{REPORT_JSON, SID, write_git_origin};
         cx.executor().allow_parking();
         let (mw, _dir, cx) = notifications_setup(cx).await;
         let root = tempfile::tempdir().unwrap();
-        write_pm(root.path());
+        write_git_origin(root.path());
         superzed_done::write_report(root.path(), &superzed_done::parse_report(REPORT_JSON, SID).unwrap()).unwrap();
         let gh = superzed_sources::test_support::FakeRunner::new();
         cx.update(|_, cx| superzed_done::init_test(cx, gh.clone(), superzed_sources::test_support::FakeRunner::new(), Some(root.path().to_path_buf())));

@@ -11,7 +11,6 @@ use superzed_sources::{RunError, Runner};
 
 pub const FIELD_KIND: &str = "Kind";
 pub const FIELD_STATUS: &str = "Status";
-pub const FIELD_AREA: &str = "Area";
 pub const FIELD_WAITING: &str = "Waiting on";
 const LIST_LIMIT: &str = "100";
 /// Issue di una sessione: fino a 3 × `MAX_ENTRIES` voci nuove (missing, problems, blockers).
@@ -243,12 +242,9 @@ async fn load_board(runner: &Arc<dyn Runner>, cfg: &PmConfig) -> Result<Board, S
     Ok(Board { project_id, fields })
 }
 
-/// Valori dei campi della board per una issue nuova (Kind, Status, Area, Waiting on).
+/// Valori dei campi della board per una issue nuova (Kind, Status, Waiting on).
 fn draft_fields(d: &IssueDraft) -> Vec<(&'static str, String)> {
     let mut values = vec![(FIELD_KIND, d.kind.name().to_string()), (FIELD_STATUS, d.status.name().to_string())];
-    if let Some(area) = &d.area {
-        values.push((FIELD_AREA, area.clone()));
-    }
     if let Some(w) = &d.waiting_on {
         values.push((FIELD_WAITING, w.clone()));
     }
@@ -420,7 +416,6 @@ mod tests {
             body: format!("corpo di {title}"),
             kind,
             status: kind.status(),
-            area: Some("frontend".into()),
             waiting_on: (kind == Kind::Blocker).then(|| "design".to_string()),
         })
     }
@@ -520,14 +515,13 @@ mod tests {
             heads,
             [
                 "gh auth status", "gh project view", "gh project field-list", "gh issue list", "gh issue create",
-                "gh project item-add", "gh project item-edit", "gh project item-edit", "gh project item-edit", "gh project item-edit",
+                "gh project item-add", "gh project item-edit", "gh project item-edit", "gh project item-edit",
             ]
         );
         assert!(l[4].contains(&format!("--body=corpo di Policy\n\n{}", marker(SID, 2))), "{}", l[4]);
         assert!(l[6].ends_with("--single-select-option-id k_blocker"));
         assert!(l[7].ends_with("--single-select-option-id st_blocked"));
-        assert!(l[8].ends_with("--single-select-option-id a_frontend"));
-        assert!(l[9].ends_with("--field-id PVTF_waiting --text=design"));
+        assert!(l[8].ends_with("--field-id PVTF_waiting --text=design"));
     }
 
     #[test]

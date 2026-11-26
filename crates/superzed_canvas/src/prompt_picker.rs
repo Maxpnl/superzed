@@ -33,24 +33,8 @@ Procedi così:
 4. Non archiviare, non modificare e non eseguire nulla che cambi stato: le decisioni le prendo io dal pannello delle notifiche.
 "#;
 
-pub const DEFAULT_BOARD_UPDATE: &str = r#"---
-name: Aggiorna board GitHub
-description: riconcilia la board claude-pm con main, i branch e i worktree, l'inbox e gli handoff recenti; propone i verdetti e scrive solo dopo conferma
----
-Usa la skill `pm-sync` di claude-pm in modalità riconciliazione completa su questo repo (`{project_dir}`).
-
-Prima di ogni verdetto raccogli le prove nell'ordine di autorità della skill: codice su main, poi worktree e branch non mergiati (senza mai fare checkout: `git log main..<branch>`, `git show`, `git diff main...<branch>`), poi le righe non sincronizzate dell'inbox, poi gli handoff successivi all'ultimo sync come ipotesi da verificare. Una cosa segnata in un handoff può essere stata sistemata dopo da un altro turno o su un altro branch: la prova è il codice, non il documento.
-
-Presenta la tabella dei verdetti con gli ID esatti e la prova accanto a ciascuno, poi fermati. Se è il primo sync della board, procedi a lotti per area come dice la skill.
-
-Scrivi su GitHub e sull'inbox solo dopo il mio sì esplicito, e solo quello che ho confermato. Non committare l'inbox: dimmi che è da committare.
-"#;
-
 /// Nome del file e contenuto dei prompt installati quando la directory globale manca.
-pub const DEFAULT_FILES: [(&str, &str); 2] = [
-    ("report-notifiche.md", DEFAULT_NOTIFICATIONS_REPORT),
-    ("aggiorna-board.md", DEFAULT_BOARD_UPDATE),
-];
+pub const DEFAULT_FILES: [(&str, &str); 1] = [("report-notifiche.md", DEFAULT_NOTIFICATIONS_REPORT)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptOrigin {
@@ -488,12 +472,9 @@ mod tests {
     async fn missing_global_dir_is_created_with_the_defaults(cx: &mut TestAppContext) {
         let fs = FakeFs::new(cx.executor());
         let entries = load_prompts(fs.clone(), Path::new("/data/prompts"), None).await;
-        assert_eq!(
-            names(&entries),
-            [("Aggiorna board GitHub", PromptOrigin::Global), ("Report notifiche", PromptOrigin::Global)]
-        );
+        assert_eq!(names(&entries), [("Report notifiche", PromptOrigin::Global)]);
         assert!(fs.is_file(Path::new("/data/prompts/report-notifiche.md")).await);
-        assert!(fs.is_file(Path::new("/data/prompts/aggiorna-board.md")).await);
+        assert!(!fs.is_file(Path::new("/data/prompts/aggiorna-board.md")).await);
     }
 
     #[gpui::test]

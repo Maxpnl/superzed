@@ -107,7 +107,6 @@ pub struct NewIssue {
     pub kind: Kind,
     pub title: String,
     pub body: String,
-    pub area: Option<String>,
     pub waiting_on: Option<String>,
     pub enabled: bool,
     pub written: bool,
@@ -126,8 +125,6 @@ pub struct Preview {
     pub session_id: String,
     /// Repo della board (`owner/nome`) per i link alle issue; `None` se non noto.
     pub repo: Option<String>,
-    /// Aree della config (scelte della tendina).
-    pub areas: Vec<String>,
     pub touched: Vec<TouchedEntry>,
     pub new_issues: Vec<NewIssue>,
     pub summary: Option<SummaryEntry>,
@@ -139,8 +136,7 @@ fn summary_comment(report: &Report) -> String {
 
 impl Preview {
     /// Proposta dal report; le voci gia' scritte (`previous`) restano visibili ma spente.
-    pub fn from_report(report: &Report, areas: &[String], previous: &RunResult) -> Self {
-        let area = report.area.clone().filter(|a| areas.contains(a));
+    pub fn from_report(report: &Report, previous: &RunResult) -> Self {
         let mut touched: Vec<TouchedEntry> = Vec::new();
         for t in &report.issues_touched {
             // una voce per issue: vince la prima
@@ -176,14 +172,14 @@ impl Preview {
                     Some(w) => format!("{text}\n\nIn attesa di: {w}"),
                     None => text.clone(),
                 };
-                NewIssue { item, kind, title: title_of(&text), body, area: area.clone(), waiting_on, enabled: !written, written, key }
+                NewIssue { item, kind, title: title_of(&text), body, waiting_on, enabled: !written, written, key }
             })
             .collect();
         let summary = (!touched.is_empty()).then(|| {
             let written = previous.is_written(SUMMARY_KEY);
             SummaryEntry { key: SUMMARY_KEY.into(), body: summary_comment(report), enabled: !written, written }
         });
-        Preview { session_id: report.session_id.clone(), repo: None, areas: areas.to_vec(), touched, new_issues, summary }
+        Preview { session_id: report.session_id.clone(), repo: None, touched, new_issues, summary }
     }
 
     /// Indirizzo della issue su GitHub, se il repo è noto.
@@ -199,8 +195,8 @@ impl Preview {
 }
 
 /// Tutto quello che il report propone (con le spunte di partenza) e' gia' su GitHub.
-pub fn fully_written(report: &Report, areas: &[String], previous: &RunResult) -> bool {
-    !previous.items.is_empty() && actions(&Preview::from_report(report, areas, previous)).is_empty()
+pub fn fully_written(report: &Report, previous: &RunResult) -> bool {
+    !previous.items.is_empty() && actions(&Preview::from_report(report, previous)).is_empty()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -212,7 +208,6 @@ pub struct IssueDraft {
     pub body: String,
     pub kind: Kind,
     pub status: Status,
-    pub area: Option<String>,
     pub waiting_on: Option<String>,
 }
 
@@ -246,7 +241,6 @@ pub fn actions(p: &Preview) -> Vec<Action> {
             body: n.body.clone(),
             kind: n.kind,
             status: n.kind.status(),
-            area: n.area.clone(),
             waiting_on: n.waiting_on.clone(),
         }));
     }
@@ -326,7 +320,7 @@ pub fn item_label(key: &str, actions: &[Action], report: &Report) -> String {
     if key == SUMMARY_KEY {
         return "Summary".into();
     }
-    let p = Preview::from_report(report, &[], &RunResult::default());
+    let p = Preview::from_report(report, &RunResult::default());
     if let Some(n) = p.new_issues.iter().find(|n| n.key == key) {
         return new_issue_label(&n.title);
     }
@@ -350,12 +344,10 @@ pub fn ordinal(n: usize) -> String {
 pub enum InvalidField {
     Title(usize),
     Body(usize),
-    Area(usize),
     Summary,
 }
 
-/// Controlli sulle voci spuntate prima di scrivere (titoli vuoti o troppo lunghi, corpi enormi,
-/// aree che non sono fra quelle della config): il primo campo in errore e il messaggio.
+/// Controlli sulle voci spuntate prima di scrivere (titoli vuoti o troppo lunghi, corpi enormi): il primo campo in errore e il messaggio.
 pub fn validate_fields(p: &Preview) -> Result<(), (InvalidField, String)> {
     for (ix, n) in p.new_issues.iter().enumerate().filter(|(_, n)| n.enabled && !n.written) {
         if n.title.trim().is_empty() {
@@ -367,9 +359,6 @@ pub fn validate_fields(p: &Preview) -> Result<(), (InvalidField, String)> {
         }
         if n.body.chars().count() > BODY_MAX_CHARS {
             return Err((InvalidField::Body(ix), format!("{label}: the description is longer than {BODY_MAX_CHARS} characters")));
-        }
-        if let Some(area) = n.area.as_ref().filter(|a| !p.areas.contains(a)) {
-            return Err((InvalidField::Area(ix), format!("{label}: the area “{area}” is not one of the configured areas")));
         }
     }
     if let Some(s) = p.summary.as_ref().filter(|s| s.enabled && !s.written)
@@ -396,17 +385,13 @@ mod tests {
         parse_report(REPORT_JSON, SID).unwrap()
     }
 
-    fn areas() -> Vec<String> {
-        vec!["frontend".into(), "backend".into()]
-    }
-
     fn keys(actions: &[Action]) -> Vec<&str> {
         actions.iter().map(Action::key).collect()
     }
 
     #[test]
     fn preview_from_the_report() {
-        let p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let p = Preview::from_report(&report(), &RunResult::default());
         assert_eq!(p.session_id, SID);
         let touched: Vec<(u64, TouchAction, &str, bool)> =
             p.touched.iter().map(|t| (t.number, t.action, t.note.as_str(), t.enabled)).collect();
@@ -422,7 +407,7 @@ mod tests {
             ]
         );
         assert_eq!(p.new_issues.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(), ["new:0", "new:1", "new:2"]);
-        assert!(p.new_issues.iter().all(|n| n.enabled && !n.written && n.area.as_deref() == Some("frontend")));
+        assert!(p.new_issues.iter().all(|n| n.enabled && !n.written));
         assert_eq!(p.new_issues[2].body, "Policy di annullamento\n\nIn attesa di: design");
         assert_eq!(p.new_issues[2].waiting_on.as_deref(), Some("design"));
         let summary = p.summary.as_ref().expect("riepilogo sull'issue principale");
@@ -431,23 +416,21 @@ mod tests {
     }
 
     #[test]
-    fn unknown_area_duplicates_and_empty_comments() {
+    fn duplicates_and_empty_comments() {
         let mut r = report();
-        r.area = Some("boh".into());
         r.issues_touched.push(crate::report::TouchedIssue { number: 12, action: TouchAction::Comment, note: Some("doppione".into()) });
         r.issues_touched.push(crate::report::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
-        let p = Preview::from_report(&r, &areas(), &RunResult::default());
-        assert!(p.new_issues.iter().all(|n| n.area.is_none()), "area fuori dalla config: nessuna");
+        let p = Preview::from_report(&r, &RunResult::default());
         assert_eq!(p.touched.iter().map(|t| t.number).collect::<Vec<_>>(), [12, 8, 30], "una voce per issue");
         assert!(!p.touched[2].enabled, "commento senza nota: spento");
         assert!(!keys(&actions(&p)).contains(&"touched:30"));
-        let none = Preview::from_report(&Report { session_id: SID.into(), ..Default::default() }, &areas(), &RunResult::default());
+        let none = Preview::from_report(&Report { session_id: SID.into(), ..Default::default() }, &RunResult::default());
         assert!(none.summary.is_none() && actions(&none).is_empty(), "nessuna issue toccata: nessun riepilogo");
     }
 
     #[test]
     fn actions_follow_the_checks_and_the_edits() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         p.new_issues[1].enabled = false;
         p.new_issues[0].title = "  Test Safari  ".into();
         p.touched[1].status = Status::Blocked;
@@ -462,7 +445,6 @@ mod tests {
                 body: "Test dell'export PDF su Safari".into(),
                 kind: Kind::Task,
                 status: Status::Backlog,
-                area: Some("frontend".into()),
                 waiting_on: None,
             })
         );
@@ -488,7 +470,7 @@ mod tests {
             ItemReport { key: "touched:12".into(), result: Ok("#12 closed".into()), issue: None },
             ItemReport { key: "new:1".into(), result: Err("gh: HTTP 502".into()), issue: None },
         ]);
-        let p = Preview::from_report(&report(), &areas(), &previous);
+        let p = Preview::from_report(&report(), &previous);
         assert!(p.new_issues[0].written && !p.new_issues[0].enabled);
         assert!(!p.new_issues[1].written && p.new_issues[1].enabled, "fallita: si riprova");
         assert!(p.touched[0].written);
@@ -499,7 +481,7 @@ mod tests {
 
     #[test]
     fn validation_of_the_edits() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         assert_eq!(validate_preview(&p), Ok(()));
         p.new_issues[1].title = "   ".into();
         assert_eq!(validate_preview(&p), Err("New issue without a title (the second)".into()));
@@ -529,7 +511,7 @@ mod tests {
 
     #[test]
     fn closes_are_counted() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         assert_eq!(closes(&actions(&p)), 1);
         p.touched[0].enabled = false;
         assert_eq!(closes(&actions(&p)), 0);
@@ -537,7 +519,7 @@ mod tests {
 
     #[test]
     fn an_edited_comment_is_what_gets_written() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         p.touched[0].note = "  Import completato e verificato  ".into();
         p.touched[1].note = String::new();
         let a = actions(&p);
@@ -546,7 +528,7 @@ mod tests {
         // un commento puro svuotato non si scrive; riempito si scrive col testo nuovo
         let mut r = report();
         r.issues_touched.push(crate::report::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
-        let mut p = Preview::from_report(&r, &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&r, &RunResult::default());
         p.touched[2].note = "Aggiunto il test".into();
         p.touched[2].enabled = true;
         assert!(actions(&p).contains(&Action::Comment { key: "touched:30".into(), number: 30, body: "Aggiunto il test".into() }));
@@ -554,7 +536,7 @@ mod tests {
 
     #[test]
     fn issue_links_need_the_repo() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         assert_eq!(p.issue_url(12), None);
         p.repo = Some("acme/acme_app".into());
         assert_eq!(p.issue_url(12).as_deref(), Some("https://github.com/acme/acme_app/issues/12"));
@@ -565,7 +547,7 @@ mod tests {
     #[test]
     fn failure_labels_are_readable() {
         let r = report();
-        let mut p = Preview::from_report(&r, &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&r, &RunResult::default());
         p.new_issues[0].title = "Test su Safari".into();
         let a = actions(&p);
         assert_eq!(item_label("new:0", &a, &r), "New issue “Test su Safari”", "il titolo modificato");
@@ -582,26 +564,10 @@ mod tests {
         assert_eq!(action_label(&Action::Comment { key: "touched:30".into(), number: 30, body: "x".into() }), "#30 (comment)");
     }
 
-    #[test]
-    fn the_area_must_be_one_of_the_config() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
-        p.new_issues[0].area = Some("backend".into());
-        p.new_issues[1].area = None;
-        assert_eq!(validate_preview(&p), Ok(()), "un'area della config o nessuna");
-        p.new_issues[2].area = Some("marketing".into());
-        assert_eq!(
-            validate_preview(&p),
-            Err("New issue “Policy di annullamento”: the area “marketing” is not one of the configured areas".into())
-        );
-        assert_eq!(validate_fields(&p).unwrap_err().0, InvalidField::Area(2));
-        p.new_issues[2].enabled = false;
-        assert_eq!(validate_preview(&p), Ok(()), "spenta: non conta");
-    }
-
     // Revisione finale 6: il riepilogo va sulla prima issue toccata spuntata.
     #[test]
     fn the_summary_goes_to_the_first_checked_touched_issue() {
-        let mut p = Preview::from_report(&report(), &areas(), &RunResult::default());
+        let mut p = Preview::from_report(&report(), &RunResult::default());
         p.touched[0].enabled = false;
         assert_eq!(p.summary_target(), Some(8));
         assert!(matches!(actions(&p).last(), Some(Action::Comment { key, number: 8, .. }) if key == SUMMARY_KEY));
@@ -610,7 +576,7 @@ mod tests {
         assert!(!keys(&actions(&p)).contains(&SUMMARY_KEY), "nessuna issue spuntata: nessun riepilogo");
         let mut previous = RunResult::default();
         previous.record(vec![ItemReport { key: "touched:12".into(), result: Ok("#12 closed".into()), issue: None }]);
-        let p = Preview::from_report(&report(), &areas(), &previous);
+        let p = Preview::from_report(&report(), &previous);
         assert_eq!(p.summary_target(), Some(12), "gia' scritta: resta l'issue principale");
     }
 
@@ -619,7 +585,7 @@ mod tests {
     fn a_comment_without_a_note_is_not_writable() {
         let mut r = report();
         r.issues_touched.push(crate::report::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
-        let p = Preview::from_report(&r, &areas(), &RunResult::default());
+        let p = Preview::from_report(&r, &RunResult::default());
         assert!(!p.touched[2].writable() && !p.touched[2].enabled);
         assert!(p.touched[0].writable() && p.touched[1].writable());
     }
@@ -628,15 +594,15 @@ mod tests {
     #[test]
     fn fully_written_needs_every_default_entry_written() {
         let r = report();
-        assert!(!fully_written(&r, &areas(), &RunResult::default()), "niente scritto");
+        assert!(!fully_written(&r, &RunResult::default()), "niente scritto");
         let mut previous = RunResult::default();
         let ok = |k: &str| ItemReport { key: k.into(), result: Ok("ok".into()), issue: None };
         previous.record(["new:0", "new:1", "new:2", "touched:12", "touched:8"].map(ok).to_vec());
-        assert!(!fully_written(&r, &areas(), &previous), "manca il riepilogo");
+        assert!(!fully_written(&r, &previous), "manca il riepilogo");
         previous.record(vec![ok(SUMMARY_KEY)]);
-        assert!(fully_written(&r, &areas(), &previous));
+        assert!(fully_written(&r, &previous));
         let empty = Report { session_id: SID.into(), ..Default::default() };
-        assert!(!fully_written(&empty, &areas(), &RunResult::default()), "report vuoto: niente da dire");
+        assert!(!fully_written(&empty, &RunResult::default()), "report vuoto: niente da dire");
     }
 
     #[test]

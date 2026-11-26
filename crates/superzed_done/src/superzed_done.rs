@@ -2,15 +2,15 @@
 //! delle modifiche alla board claude-pm e scrittura con `gh` dopo la conferma. Niente UI.
 pub mod gh;
 pub mod headless;
-pub mod pm;
 pub mod preview;
+pub mod repo;
 pub mod report;
 pub mod result;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 pub use gh::{execute, marker, marker_query};
-pub use pm::{load_pm, parse_areas};
+pub use repo::{config_for, parse_github_repo, repo_of};
 pub use preview::{
     Action, BODY_MAX_CHARS, InvalidField, IssueDraft, Kind, NewIssue, Preview, SUMMARY_KEY, Status, SummaryEntry,
     TITLE_MAX_CHARS, TouchedEntry, action_label, actions, closes, fully_written, item_label, new_key, ordinal, title_of,
@@ -148,7 +148,7 @@ mod tests {
         let report = parse_report(REPORT_JSON, SID).unwrap();
         let path = result_path(dir.path(), SID).unwrap();
         ensure_reports_dir(dir.path()).unwrap();
-        let preview = Preview::from_report(&report, &["frontend".into()], &RunResult::default());
+        let preview = Preview::from_report(&report, &RunResult::default());
         let spy = Arc::new(Spy { inner: write_runner(), path: path.clone(), seen: Default::default() });
         let cfg = superzed_sources::github::PmConfig { owner: "acme".into(), project_number: 3, repo: "acme/acme_app".into(), stale_days: 14 };
         let run = futures::executor::block_on(write_and_save(spy.clone(), cfg, &report, actions(&preview), RunResult::default(), path.clone()));
@@ -157,7 +157,7 @@ mod tests {
         assert!(!at_close.is_written("touched:12"));
         assert_eq!(at_close.snapshot(SID), Some(report.clone()), "copia del report salvata prima della prima voce");
         // interrotta qui: la riprova rifa' solo il resto
-        let retry = Preview::from_report(&report, &["frontend".into()], &at_close);
+        let retry = Preview::from_report(&report, &at_close);
         assert_eq!(actions(&retry).iter().map(Action::key).collect::<Vec<_>>(), ["touched:12", "touched:8", "summary"]);
         assert_eq!((run.reports.len(), run.save_error.clone()), (6, None));
         assert_eq!(RunResult::read(&path), run.result);

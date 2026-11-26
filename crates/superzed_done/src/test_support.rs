@@ -6,22 +6,19 @@ use superzed_sources::test_support::{AUTH_OK, FakeRunner, ok};
 /// Id di sessione di claude (forma reale).
 pub const SID: &str = "11111111-1111-4111-8111-111111111111";
 
-/// `.claude/claude-pm.local.md` di acme_app (Project 3 di acme, due aree).
-pub const PM_TEXT: &str = "---\nproject_number: 3\nproject_owner: acme\nrepo: \"acme/acme_app\"\nareas:\n  frontend: [\"app/**\"]\n  backend:\n    - \"sap/**\"\nquestion_assignee: Maxpnl\n---\n\nNote del progetto.\n";
-
 /// Report valido: una cosa fatta, un blocker, una mancanza, un problema, due issue toccate.
-pub const REPORT_JSON: &str = r#"{"session_id": "11111111-1111-4111-8111-111111111111", "area": "frontend",
+pub const REPORT_JSON: &str = r#"{"session_id": "11111111-1111-4111-8111-111111111111",
  "done": ["Import utenti da CSV"],
  "blockers": [{"title": "Policy di annullamento", "waiting_on": "design"}],
  "missing": ["Test dell'export PDF su Safari"],
  "problems": ["Quale formato per la nota di credito?"],
  "issues_touched": [{"number": 12, "action": "close", "note": "Import completato"}, {"number": 8, "action": "update", "note": "Serve l'accesso allo staging"}]}"#;
 
-/// Scrive `PM_TEXT` in `<root>/.claude/claude-pm.local.md`.
-pub fn write_pm(root: &Path) {
-    let path = root.join(superzed_sources::github::PM_CONFIG);
-    std::fs::create_dir_all(path.parent().expect("cartella .claude")).unwrap();
-    std::fs::write(path, PM_TEXT).unwrap();
+/// Scrive `<root>/.git/config` con l'origin di acme_app.
+pub fn write_git_origin(root: &Path) {
+    let dir = root.join(".git");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config"), "[remote \"origin\"]\n\turl = git@github.com:acme/acme_app.git\n").unwrap();
 }
 
 /// `gh project view 3 --owner acme --format json` (forma reale, dati finti).
@@ -57,7 +54,8 @@ pub fn marker_hits(session: &str, hits: &[(usize, u64)]) -> String {
     serde_json::Value::Array(issues).to_string()
 }
 
-/// `gh` finto per la scrittura sulla board di acme/acme_app: nessuna issue gia' creata.
+/// `gh` finto per la scrittura sulla board di acme/acme_app: nessuna issue gia' creata. Il
+/// numero di Project e' 3 o 0 (quello di `config_for`, finche' la board esiste).
 pub fn write_runner() -> Arc<FakeRunner> {
     let r = FakeRunner::new();
     r.on("gh auth status", ok(AUTH_OK));
@@ -67,6 +65,9 @@ pub fn write_runner() -> Arc<FakeRunner> {
     r.on("gh issue create", ok(&format!("{CREATED_URL}\n")));
     r.on("gh issue edit", ok(&format!("{CREATED_URL}\n")));
     r.on("gh project item-add 3 --owner acme", ok(ITEM_ADDED));
+    r.on("gh project view 0 --owner acme", ok(PROJECT_VIEW));
+    r.on("gh project field-list 0 --owner acme", ok(FIELDS));
+    r.on("gh project item-add 0 --owner acme", ok(ITEM_ADDED));
     r.on("gh project item-edit", ok(r#"{"id":"PVTI_new"}"#));
     r.on("gh issue comment", ok("https://github.com/acme/acme_app/issues/12#issuecomment-1\n"));
     r.on("gh issue close", ok(""));
