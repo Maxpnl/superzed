@@ -8354,8 +8354,8 @@ mod tests {
 
     // superzed: azioni raggiungibili solo dal clic (mai da tastiera), quindi senza
     // binding di default: `ShowAccountLimits` si apre solo dal clic sui limiti in
-    // status bar (Task 18).
-    const CLICK_ONLY: &[&str] = &["superzed::ShowAccountLimits"];
+    // status bar (Task 18); `OpenStatus` solo dalla palette dei comandi.
+    const CLICK_ONLY: &[&str] = &["superzed::ShowAccountLimits", "superzed::OpenStatus"];
 
     #[gpui::test]
     fn test_superzed_every_action_has_a_default_binding(cx: &mut TestAppContext) {

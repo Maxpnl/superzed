@@ -13,6 +13,7 @@ use superzed_sources::Runner;
 use superzed_sources::github::PmConfig;
 
 pub const STATUS_REFRESH: Duration = Duration::from_secs(60);
+const STATUS_SIZE: (f32, f32) = (720., 520.);
 /// Sorgente delle notifiche delle attese.
 pub const WAITING_SOURCE: &str = "Waiting";
 
@@ -27,7 +28,7 @@ pub enum WaitingState {
 }
 
 impl WaitingState {
-    fn items(&self) -> &[WaitingItem] {
+    pub fn items(&self) -> &[WaitingItem] {
         match self {
             WaitingState::Fresh { items, .. } | WaitingState::Stale { items, .. } => items,
             WaitingState::NotLoaded | WaitingState::Unavailable(_) => &[],
@@ -162,6 +163,25 @@ async fn read_status(runner: Arc<dyn Runner>, root: PathBuf, config: Result<PmCo
 }
 
 impl CanvasView {
+    pub fn status_node(&self) -> Option<NodeId> {
+        self.model.frames().iter().find(|frame| frame.kind == NodeKind::Status).map(|frame| frame.id)
+    }
+
+    /// Un solo nodo Stato per canvas: lo crea (e avvia le letture) se manca, poi gli da' il focus.
+    pub fn open_status(&mut self, window: &mut Window, cx: &mut Context<Self>) -> NodeId {
+        let id = match self.status_node() {
+            Some(id) => id,
+            None => {
+                let node = crate::status_node::StatusNode::new(cx.entity().downgrade(), cx);
+                let id = self.add_node(NodeKind::Status, Box::new(node), size(STATUS_SIZE.0, STATUS_SIZE.1), "status", cx);
+                self.start_status_refresh(cx);
+                id
+            }
+        };
+        self.focus_node(id, window, cx);
+        id
+    }
+
     pub fn status_waiting(&self) -> &WaitingState {
         &self.status.waiting
     }
@@ -317,6 +337,27 @@ impl CanvasView {
         .detach();
     }
 
+    /// «Close» di una riga d'attesa: chiude la issue solo dopo la conferma.
+    pub fn close_waiting_item_with_confirm(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let canvas = cx.entity().downgrade();
+        workspace.update(cx, |ws, cx| {
+            workspace::superzed_confirm::superzed_confirm_action(
+                ws,
+                format!("Close issue #{number}?"),
+                "Close",
+                true,
+                move |_, cx| {
+                    canvas.update(cx, |canvas, cx| canvas.close_waiting_item(number, cx)).ok();
+                },
+                window,
+                cx,
+            )
+        });
+    }
+
     pub fn node_for_session(&self, session_id: &str, cx: &App) -> Option<NodeId> {
         let store = superzed_sessions::SessionStore::global(cx)?;
         let store = store.read(cx);
@@ -424,7 +465,7 @@ impl CanvasView {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::done::tests::notifications;
     use super::super::tests::{capture_spec, close_all, hook, store};
     use super::*;
@@ -446,15 +487,15 @@ mod tests {
 
     const WORKTREE_LIST: &str = "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n";
 
-    struct Setup {
-        canvas: Entity<CanvasView>,
-        dir: tempfile::TempDir,
-        gh: Arc<FakeRunner>,
+    pub(crate) struct Setup {
+        pub(crate) canvas: Entity<CanvasView>,
+        pub(crate) dir: tempfile::TempDir,
+        pub(crate) gh: Arc<FakeRunner>,
     }
 
     /// Canvas con la root della pipeline in un tempdir (con o senza origin) e un `gh` finto
     /// che risponde a utente, lista delle attese e lista dei worktree.
-    async fn setup(cx: &mut TestAppContext, origin: bool) -> (Setup, &'static mut VisualTestContext) {
+    pub(crate) async fn setup(cx: &mut TestAppContext, origin: bool) -> (Setup, &'static mut VisualTestContext) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         if origin {

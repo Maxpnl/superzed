@@ -203,6 +203,7 @@ fn catalog() -> Vec<(HintGroup, &'static str, bool, Box<dyn Action>)> {
         (Canvas, "Reset zoom", false, Box::new(a::CanvasZoomReset)),
         (Canvas, "Zoom to focused node", false, Box::new(a::ZoomToFocusedNode)),
         (Canvas, "Open kanban", false, Box::new(a::OpenKanban)),
+        (Canvas, "Open status", false, Box::new(a::OpenStatus)),
         (Node, "Rename", false, Box::new(a::RenameNode)),
         (Node, "Next color", false, Box::new(a::CycleNodeColor)),
         (Node, "Golden", false, Box::new(a::ToggleGolden)),

@@ -21,6 +21,8 @@ pub enum NodeKind {
     Automations,
     /// Pannello di una fonte (GitHub, HyperDX, Zabbix): `source_node`.
     Source,
+    /// Attese, worktree e chat del progetto: `status_node`, uno per canvas.
+    Status,
 }
 
 impl NodeKind {

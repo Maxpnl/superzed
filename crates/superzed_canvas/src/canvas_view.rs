@@ -86,7 +86,7 @@ const NOTE_MIN_SIZE: (f32, f32) = (120., 80.);
 /// agganciate (quelle agganciate prendono la dimensione dal contenitore, che ha la sua).
 fn free_resizable(frame: &NodeFrame) -> bool {
     match frame.kind {
-        NodeKind::Note => true,
+        NodeKind::Note | NodeKind::Status => true,
         NodeKind::Shell | NodeKind::Claude | NodeKind::Source => frame.dock.is_none(),
         NodeKind::Kanban | NodeKind::Automations => false,
     }
@@ -553,6 +553,9 @@ impl CanvasView {
     }
 
     pub fn remove_nodes(&mut self, ids: &[NodeId], cx: &mut Context<Self>) {
+        if self.status_node().is_some_and(|status| ids.contains(&status)) {
+            self.stop_status_refresh();
+        }
         self.free_chats_if_container_removed(ids, cx);
         self.drop_sessions(ids, cx);
         for id in ids {
@@ -3399,6 +3402,11 @@ impl CanvasView {
                 self.watch_source(frame.id, &view, window, cx);
                 self.insert_restored_node(frame, Box::new(SourceNode::new(view)), cx);
             }
+            NodeKind::Status => {
+                let node = crate::status_node::StatusNode::new(cx.entity().downgrade(), cx);
+                self.insert_restored_node(frame, Box::new(node), cx);
+                self.start_status_refresh(cx);
+            }
             NodeKind::Kanban | NodeKind::Automations => {
                 let kind = if frame.kind == NodeKind::Kanban { DockKind::Kanban } else { DockKind::Automations };
                 let state = ContainerState { chat_size: kanban_layout::chat_size_from_data(data), data: data.clone() };
@@ -4946,6 +4954,50 @@ mod tests {
         assert_eq!(canvas.read_with(cx, |c, _| c.kanban_node()), Some(first));
         let focused = canvas.read_with(cx, |c, cx| c.node_focus_handle(first, cx).unwrap());
         cx.update(|window, _| assert!(focused.is_focused(window), "focus sul kanban"));
+    }
+
+    #[gpui::test]
+    async fn open_status_twice_keeps_one_and_it_survives_a_restore(cx: &mut TestAppContext) {
+        let (setup, cx) = super::status::tests::setup(cx, true).await;
+        let canvas = setup.canvas.clone();
+        let reads = || setup.gh.count("gh issue list");
+        let first = canvas.update_in(cx, |c, window, cx| c.open_status(window, cx));
+        cx.run_until_parked();
+        let second = canvas.update_in(cx, |c, window, cx| c.open_status(window, cx));
+        cx.run_until_parked();
+        assert_eq!(first, second);
+        canvas.read_with(cx, |c, _| {
+            assert_eq!(c.model.frames().iter().filter(|f| f.kind == NodeKind::Status).count(), 1);
+            let frame = c.model.frame(first).unwrap();
+            assert_eq!(frame.kind, NodeKind::Status);
+            assert_eq!(frame.dock, None, "non agganciato");
+            assert_eq!(c.container_kind_of(first), None, "non e' un contenitore");
+        });
+        assert_eq!(reads(), 1, "una lettura al primo open, nessuna al secondo");
+
+        let file = canvas.read_with(cx, |c, cx| c.snapshot(cx));
+        let record = file.nodes.iter().find(|n| n.id == first.0).map(|n| serde_json::to_value(n).unwrap()).unwrap();
+        assert_eq!(record["kind"], "status");
+        assert_eq!(record.get("data"), Some(&serde_json::Value::Null));
+
+        canvas.update(cx, |c, cx| c.remove_nodes(&[first], cx));
+        cx.run_until_parked();
+        canvas.update_in(cx, |c, window, cx| {
+            c.persist.as_mut().unwrap().loaded = false;
+            c.finish_load(LoadOutcome::Loaded(file), window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(canvas.read_with(cx, |c, _| c.status_node()), Some(first), "ripristinato");
+        assert_eq!(reads(), 2, "il ripristino legge subito");
+        cx.executor().advance_clock(STATUS_REFRESH);
+        cx.run_until_parked();
+        assert_eq!(reads(), 3, "timer ripartito");
+
+        canvas.update(cx, |c, cx| c.remove_nodes(&[first], cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(STATUS_REFRESH);
+        cx.run_until_parked();
+        assert_eq!(reads(), 3, "chiuso il nodo, il timer si ferma");
     }
 
     #[gpui::test]

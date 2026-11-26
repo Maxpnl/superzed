@@ -57,6 +57,8 @@ actions!(
         CycleProjectTabColor,
         /// Apre il kanban del progetto (o porta il focus su quello esistente).
         OpenKanban,
+        /// Apre il nodo Stato del progetto (o porta il focus su quello esistente).
+        OpenStatus,
         /// Sposta la card selezionata del kanban nella colonna successiva.
         MoveCardNext,
         /// Sposta la card selezionata del kanban nella colonna precedente.
@@ -132,6 +134,7 @@ pub const ALL_ACTION_NAMES: &[&str] = &[
     "superzed::SidebarView",
     "superzed::MoveSelectedNodes",
     "superzed::OpenKanban",
+    "superzed::OpenStatus",
     "superzed::MoveCardNext",
     "superzed::MoveCardPrev",
     "superzed::NewClaudeNodePick",

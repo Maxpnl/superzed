@@ -64,11 +64,15 @@ Register as many Claude accounts as you have and superzed reads their quotas str
 
 <p align="center"><img src="assets/readme/done.svg" alt="Notifications panel with a Report ready card, and the Update GitHub review listing touched issues, a new issue and a summary before writing"></p>
 
-When a kanban chat reaches **Done**, superzed asks Claude for a short report: which issues it touched, which new issues it found, and a summary. You review everything in one dialog and edit titles and comments as needed. Nothing reaches GitHub until you press **Write to GitHub**.
+When a kanban chat reaches **Done**, superzed asks Claude for a short report: which issues it touched, what is blocking it, and a summary. Blockers become issues labelled `blocker`, whose first line says who they wait on (`Waiting on: alice`). You review everything in one dialog and edit titles and comments as needed. Nothing reaches GitHub until you press **Write to GitHub**. The repository comes from the `origin` remote: no project board and no extra configuration.
 
-### Notifications Claude can raise
+### Notifications and waits Claude can raise
 
-Every chat has `superzed-notify` on its `PATH`, so Claude (or a script, or an automation) can raise a notification with a severity, a summary and details. **Resolve** opens a new chat in the kanban that already knows what the notification is about.
+Every chat has `superzed-notify` and `superzed-wait` on its `PATH`. With `superzed-notify` Claude (or a script, or an automation) raises a notification with a severity, a summary and details; **Resolve** opens a new chat in the kanban that already knows what the notification is about. With `superzed-wait --on me --title "…"` a chat that cannot go on without a person (a missing credential, a go-ahead, another team's answer) opens a `blocker` issue and gets its number back; a wait on you also raises a notification.
+
+### Status
+
+**Open status** in the command palette puts a Status node on the canvas, one per project. It lists the open `blocker` issues (yours first; click to open, close with a confirmation, or jump to the chat that raised it), the repository's worktrees with their dirty files and distance from the base branch, and every chat with its state. It refreshes every minute and keeps a copy of the waits in `.superzed/waiting.json` for when GitHub cannot be reached.
 
 ### Automations
 
@@ -108,7 +112,7 @@ You will need:
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on your `PATH`.
 - Optionally, the [superpowers](https://github.com/obra/superpowers) plugin, so the kanban can follow phases automatically.
-- Optionally, the [`gh`](https://cli.github.com) CLI, logged in, for the GitHub source and Done → GitHub.
+- Optionally, the [`gh`](https://cli.github.com) CLI, logged in, for the GitHub source, Done → GitHub and waits.
 
 **Accounts** live in `~/.config/superzed/accounts.json`. On first launch they are imported from nodeterm if you use it. Otherwise list them yourself:
 

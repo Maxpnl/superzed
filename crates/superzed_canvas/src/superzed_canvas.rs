@@ -19,6 +19,7 @@ pub mod schedule;
 pub mod severity_style;
 pub mod source_node;
 pub mod source_picker;
+pub mod status_node;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod terminal_node;
@@ -98,6 +99,11 @@ pub fn init(cx: &mut App) {
             .register_action(|ws, _: &superzed_actions::OpenKanban, window, cx| {
                 with_canvas(ws, window, cx, |c, window, cx| {
                     c.open_kanban(window, cx);
+                })
+            })
+            .register_action(|ws, _: &superzed_actions::OpenStatus, window, cx| {
+                with_canvas(ws, window, cx, |c, window, cx| {
+                    c.open_status(window, cx);
                 })
             })
             .register_action(|ws, _: &crate::source_picker::NewSourcePanel, window, cx| {

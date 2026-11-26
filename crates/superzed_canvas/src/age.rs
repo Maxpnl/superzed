@@ -26,6 +26,19 @@ pub fn age_label(then: i64, now: DateTime<Local>) -> String {
     }
 }
 
+/// Durata corta per le righe del nodo Stato: «<1m», «10m», «2h», «6d».
+pub fn short_age(age: std::time::Duration) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match age.as_secs() {
+        seconds if seconds < MINUTE => "<1m".to_string(),
+        seconds if seconds < HOUR => format!("{}m", seconds / MINUTE),
+        seconds if seconds < DAY => format!("{}h", seconds / HOUR),
+        seconds => format!("{}d", seconds / DAY),
+    }
+}
+
 /// Quanto e' fresca una chat: dall'ultima risposta (o dalla nascita se non ha mai
 /// risposto). Una chat al lavoro o in attesa dell'utente e' sempre fresca.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
