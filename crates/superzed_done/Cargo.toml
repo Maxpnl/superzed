@@ -15,6 +15,7 @@ path = "src/superzed_done.rs"
 test-support = ["superzed_sources/test-support"]
 
 [dependencies]
+chrono.workspace = true
 futures.workspace = true
 gpui.workspace = true
 log.workspace = true

@@ -6,6 +6,7 @@ pub mod preview;
 pub mod repo;
 pub mod report;
 pub mod result;
+pub mod waiting;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
@@ -22,6 +23,11 @@ pub use report::{
     report_markdown, report_path, report_summary, result_path, safe_session_id, write_atomic, write_report,
 };
 pub use result::{FoundIssue, ItemOutcome, ItemReport, REPORT_CHANGED, ReviewSource, RunResult, review_source};
+
+pub use waiting::{
+    WAITING_FILE, WaitOn, WaitRequest, WaitingItem, close_waiting, gh_user, open_wait, parse_wait_request, parse_waiting,
+    parse_waiting_file, read_waiting, session_of, wait_body, wait_marker, waiting_file_json, waiting_list_args,
+};
 
 pub use headless::{
     CLAUDE_TIMEOUT, ClaudeProcessRunner, SUPERZED_HOOK_VARS, TRANSCRIPT_TAIL, claude_argv, headless_report, headless_stdin, parse_claude_output,

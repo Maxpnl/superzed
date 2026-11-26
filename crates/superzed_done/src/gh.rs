@@ -131,7 +131,7 @@ pub fn find_markers(json: &str, session: &str) -> Result<BTreeMap<usize, FoundIs
 }
 
 /// `gh …`: stdout se riesce, altrimenti un errore leggibile.
-async fn gh(runner: &Arc<dyn Runner>, args: Vec<String>, cfg: &PmConfig) -> Result<String, String> {
+pub(crate) async fn gh(runner: &Arc<dyn Runner>, args: Vec<String>, cfg: &PmConfig) -> Result<String, String> {
     match runner.run("gh", &args, None).await {
         Err(RunError::NotFound(_)) => Err(GH_MISSING.into()),
         Err(RunError::Failed(e)) => Err(format!("gh: {e}")),
@@ -142,6 +142,10 @@ async fn gh(runner: &Arc<dyn Runner>, args: Vec<String>, cfg: &PmConfig) -> Resu
 
 /// Crea l'etichetta dei blocker; se esiste gia' va bene.
 pub async fn ensure_label(runner: &Arc<dyn Runner>, cfg: &PmConfig) -> Result<(), String> {
+    create_label(runner, cfg).await.map_err(|e| format!("label “{BLOCKER_LABEL}”: {e}"))
+}
+
+async fn create_label(runner: &Arc<dyn Runner>, cfg: &PmConfig) -> Result<(), String> {
     match runner.run("gh", &label_create_args(cfg), None).await {
         Err(RunError::NotFound(_)) => Err(GH_MISSING.into()),
         Err(RunError::Failed(e)) => Err(format!("gh: {e}")),
@@ -340,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_issue_is_created_once_after_the_label_and_the_search() {
+    fn new_issues_are_created_in_order_after_the_label_and_the_search() {
         let r = write_runner();
         let out = run(&r, vec![draft(2, "Policy", false), draft(3, "Altra", false)], BTreeMap::new());
         assert_eq!(out[0], ItemReport { key: "new:2".into(), result: Ok(CREATED_URL.into()), issue: Some(FoundIssue { number: 42, url: CREATED_URL.into() }) });
@@ -388,7 +392,7 @@ mod tests {
         r.on("gh label create", fail(1, "HTTP 502: bad gateway"));
         let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
         let out = run(&r, vec![draft(0, "Test", false), close], BTreeMap::new());
-        assert_eq!(out[0].result, Err("gh: HTTP 502: bad gateway".into()));
+        assert_eq!(out[0].result, Err("label “blocker”: gh: HTTP 502: bad gateway".into()));
         assert_eq!((r.count("gh issue create"), r.count("gh issue edit")), (0, 0));
         assert_eq!(out[1].result, Ok("#12 closed".into()));
     }

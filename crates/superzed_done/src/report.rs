@@ -129,7 +129,7 @@ fn touched_item(v: &Value, path: &str) -> Result<TouchedIssue, String> {
         .ok_or_else(|| format!("{path}.number: an issue number is needed"))?;
     let raw = o.get("action").and_then(Value::as_str).unwrap_or_default();
     let action = TouchAction::parse(raw).ok_or_else(|| {
-        format!("{path}.action: “{}” is not close, update or comment", raw.chars().take(40).collect::<String>())
+        format!("{path}.action: “{}” is not close or comment", raw.chars().take(40).collect::<String>())
     })?;
     Ok(TouchedIssue { number, action, note: opt_text(o.get("note"), &format!("{path}.note"))? })
 }
@@ -355,7 +355,7 @@ mod tests {
         }
         assert_eq!(
             err(r#"{"issues_touched": [{"number": 3, "action": "delete"}]}"#),
-            "issues_touched[0].action: “delete” is not close, update or comment"
+            "issues_touched[0].action: “delete” is not close or comment"
         );
         // al limite si passa; i caratteri si contano come caratteri, non byte
         let edge = serde_json::json!({"done": vec!["è".repeat(MAX_ENTRY_CHARS); MAX_ENTRIES]}).to_string();
