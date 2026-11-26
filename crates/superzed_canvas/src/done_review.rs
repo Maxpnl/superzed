@@ -1,6 +1,6 @@
 //! Anteprima "Update GitHub": le modifiche proposte dal report di una chat in Fatto,
 //! ognuna con la sua spunta; titolo e corpo delle issue nuove e commento delle issue
-//! toccate modificabili, Status a scelta. Scrive solo il pulsante «Scrivi su
+//! toccate modificabili, «Assign to me» per i blocker. Scrive solo il pulsante «Scrivi su
 //! GitHub»: il modale non gestisce `menu::Confirm` (Invio nei campi non fa nulla, nel corpo
 //! va a capo) ed Esc chiude. Aprirlo di nuovo per la stessa sessione (un altro «Rivedi») lo
 //! lascia aperto.
@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     IntoElement, Render, SharedString, Subscription, Window,
 };
-use superzed_done::{InvalidField, Preview, TouchAction, actions, touch_label, validate_fields};
+use superzed_done::{InvalidField, Preview, TouchAction, WAITING_PREFIX, actions, touch_label, validate_fields};
 use ui::{
     Button, ButtonLink, ButtonSize, ButtonStyle, Checkbox, Icon, IconName, IconSize, Label, LabelSize, TintColor,
     ToggleState, prelude::*,
@@ -221,10 +221,9 @@ impl DoneReviewModal {
         }
     }
 
-    /// Status di una issue toccata con `update`: il successivo, in giro.
-    pub fn cycle_status(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(t) = self.preview.touched.get_mut(ix).filter(|t| t.action == TouchAction::Update && !t.written) {
-            t.status = t.status.next();
+    pub fn toggle_assign_me(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(n) = self.preview.new_issues.get_mut(ix).filter(|n| !n.written) {
+            n.assign_me = !n.assign_me;
             cx.notify();
         }
     }
@@ -316,11 +315,6 @@ impl Render for DoneReviewModal {
                 .child(Label::new("Already written").color(Color::Success))
                 .into_any_element()
         };
-        // Lo Status si cambia con un clic (giro fra le scelte)
-        let choice = |id: String, text: String| {
-            Button::new(SharedString::from(id), text).style(ButtonStyle::Outlined).size(ButtonSize::Medium)
-        };
-
         let touched: Vec<AnyElement> = self
             .preview
             .touched
@@ -362,13 +356,7 @@ impl Render for DoneReviewModal {
                             .gap_2()
                             .child(check)
                             .child(number)
-                            .child(action)
-                            .when(t.action == TouchAction::Update && !t.written, |d| {
-                                d.child(
-                                    choice(format!("superzed-done-status-{ix}"), format!("Status: {}", t.status.name()))
-                                        .on_click(cx.listener(move |m, _, _, cx| m.cycle_status(ix, cx))),
-                                )
-                            }),
+                            .child(action),
                     )
                     .when(t.written && !t.note.is_empty(), |d| {
                         d.child(div().pl_6().child(Label::new(t.note.clone()).color(Color::Muted)))
@@ -401,9 +389,21 @@ impl Render for DoneReviewModal {
                         h_flex()
                             .gap_2()
                             .child(check)
-                            .child(Label::new(format!("{} · {}", n.kind.name(), n.kind.status().name())))
+                            .child(Label::new("Blocker"))
                             .when_some(n.waiting_on.clone(), |d, w| {
-                                d.child(Label::new(format!("Waiting on: {w}")).color(Color::Muted))
+                                d.child(Label::new(format!("{WAITING_PREFIX}{w}")).color(Color::Muted))
+                            })
+                            .when(!n.written, |d| {
+                                d.child(
+                                    div().debug_selector(move || format!("superzed-done-assign-{ix}")).child(
+                                        Checkbox::new(
+                                            SharedString::from(format!("superzed-done-assign-check-{ix}")),
+                                            ToggleState::from(n.assign_me),
+                                        )
+                                        .label("Assign to me")
+                                        .on_click(cx.listener(move |m, _: &ToggleState, _, cx| m.toggle_assign_me(ix, cx))),
+                                    ),
+                                )
                             }),
                     )
                     .when(n.written, |d| d.child(div().pl_6().child(Label::new(n.title.clone()).color(Color::Muted))))
@@ -516,7 +516,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
     use std::{cell::RefCell, rc::Rc};
     use superzed_done::test_support::{REPORT_JSON, SID};
-    use superzed_done::{Action, ItemReport, RunResult, Status, parse_report};
+    use superzed_done::{Action, ItemReport, RunResult, parse_report};
 
     type Sink = Rc<RefCell<Option<Preview>>>;
 
@@ -552,27 +552,33 @@ mod tests {
         for selector in ["superzed-done-touched-0", "superzed-done-new-0", "superzed-done-write"] {
             assert!(cx.debug_bounds(selector).is_some(), "{selector}");
         }
-        assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 6);
+        assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 4);
         modal.update_in(cx, |m, window, cx| {
-            m.toggle_new(1, cx);
+            m.toggle_touched(1, cx);
+            m.toggle_assign_me(0, cx);
             m.title_editor(0).unwrap().update(cx, |e, cx| e.set_text("Test su Safari", window, cx));
-            m.cycle_status(1, cx); // In Progress → Blocked
         });
-        assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 5);
+        assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 3);
         modal.update_in(cx, |m, window, cx| m.write(window, cx));
         cx.run_until_parked();
         let p = got.borrow_mut().take().expect("anteprima consegnata");
         let a = superzed_done::actions(&p);
-        assert_eq!(a.iter().map(Action::key).collect::<Vec<_>>(), ["new:0", "new:2", "touched:12", "touched:8", "summary"]);
+        assert_eq!(a.iter().map(Action::key).collect::<Vec<_>>(), ["new:2", "touched:12", "summary"]);
         match &a[0] {
-            Action::Upsert(d) => assert_eq!(d.title.as_str(), "Test su Safari"),
-            other => panic!("{other:?}"),
-        }
-        match &a[3] {
-            Action::SetStatus { status, .. } => assert_eq!(*status, Status::Blocked),
+            Action::Upsert(d) => assert_eq!((d.title.as_str(), d.assign_me), ("Test su Safari", true)),
             other => panic!("{other:?}"),
         }
         assert!(!is_open(&workspace, cx), "scritto: il modale si chiude");
+    }
+
+    #[gpui::test]
+    async fn assign_to_me_is_offered_on_unwritten_new_issues(cx: &mut TestAppContext) {
+        let (_workspace, modal, _got, cx) = open(cx, preview(&RunResult::default())).await;
+        redraw(cx);
+        assert!(cx.debug_bounds("superzed-done-assign-0").is_some());
+        assert!(!modal.read_with(cx, |m, _| m.preview().new_issues[0].assign_me));
+        modal.update(cx, |m, cx| m.toggle_assign_me(0, cx));
+        assert!(modal.read_with(cx, |m, _| m.preview().new_issues[0].assign_me));
     }
 
     #[gpui::test]
@@ -605,28 +611,31 @@ mod tests {
     async fn written_entries_are_shown_but_never_rewritten(cx: &mut TestAppContext) {
         let mut previous = RunResult::default();
         previous.record(vec![
-            ItemReport { key: "new:0".into(), result: Ok("https://github.com/acme/acme_app/issues/42".into()), issue: None },
+            ItemReport { key: "new:2".into(), result: Ok("https://github.com/acme/acme_app/issues/42".into()), issue: None },
             ItemReport { key: "touched:12".into(), result: Ok("#12 chiusa".into()), issue: None },
         ]);
         let (_workspace, modal, _got, cx) = open(cx, preview(&previous)).await;
         modal.update(cx, |m, cx| {
             m.toggle_new(0, cx);
             m.toggle_touched(0, cx);
+            m.toggle_assign_me(0, cx);
         });
         modal.read_with(cx, |m, cx| {
             assert!(m.preview().new_issues[0].written && !m.preview().new_issues[0].enabled, "la spunta non la riaccende");
             assert!(!m.preview().touched[0].enabled);
-            assert_eq!(m.pending(cx), 4);
+            assert!(!m.preview().new_issues[0].assign_me, "una voce scritta non si cambia");
+            assert_eq!(m.pending(cx), 2);
         });
         redraw(cx);
         assert!(cx.debug_bounds("superzed-done-written-new-0").is_some(), "«Già scritto» al posto della spunta");
+        assert!(cx.debug_bounds("superzed-done-assign-0").is_none(), "niente «Assign to me» su una voce scritta");
     }
 
     #[gpui::test]
     async fn nothing_left_to_write_says_so(cx: &mut TestAppContext) {
         let (workspace, modal, got, cx) = open(cx, preview(&RunResult::default())).await;
         modal.update_in(cx, |m, window, cx| {
-            (0..3).for_each(|ix| m.toggle_new(ix, cx));
+            m.toggle_new(0, cx);
             (0..2).for_each(|ix| m.toggle_touched(ix, cx));
             m.toggle_summary(cx);
             m.write(window, cx);
@@ -702,7 +711,7 @@ mod tests {
         redraw(cx);
         assert!(cx.debug_bounds("superzed-done-link-0").is_some() && cx.debug_bounds("superzed-done-link-1").is_some());
         assert!(cx.debug_bounds("superzed-done-close-0").is_some(), "chiusura evidenziata");
-        assert!(cx.debug_bounds("superzed-done-close-1").is_none(), "aggiorna: niente evidenza");
+        assert!(cx.debug_bounds("superzed-done-close-1").is_none(), "commento: niente evidenza");
     }
 
     #[gpui::test]

@@ -11,7 +11,6 @@ pub const TRANSCRIPT_SEPARATOR: &str = "---TRANSCRIPT---";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchAction {
     Close,
-    Update,
     Comment,
 }
 
@@ -19,7 +18,8 @@ impl TouchAction {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim() {
             "close" => Some(Self::Close),
-            "update" => Some(Self::Update),
+            // vecchi report: l'aggiornamento dello Status non esiste piu', resta la nota
+            "update" => Some(Self::Comment),
             "comment" => Some(Self::Comment),
             _ => None,
         }
@@ -28,7 +28,6 @@ impl TouchAction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Close => "close",
-            Self::Update => "update",
             Self::Comment => "comment",
         }
     }
@@ -36,7 +35,6 @@ impl TouchAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Close => "chiudi",
-            Self::Update => "aggiorna Status",
             Self::Comment => "commenta",
         }
     }
@@ -258,7 +256,7 @@ pub fn write_report(root: &Path, r: &Report) -> Result<(), String> {
 
 fn schema_example(session_id: &str) -> String {
     format!(
-        r#"{{"session_id": "{session_id}", "done": ["…"], "blockers": [{{"title": "…", "waiting_on": "<chi o cosa si aspetta, o null>"}}], "missing": ["…"], "problems": ["…"], "issues_touched": [{{"number": 12, "action": "close|update|comment", "note": "…"}}]}}"#
+        r#"{{"session_id": "{session_id}", "done": ["…"], "blockers": [{{"title": "…", "waiting_on": "<chi o cosa si aspetta, o null>"}}], "missing": ["…"], "problems": ["…"], "issues_touched": [{{"number": 12, "action": "close|comment", "note": "…"}}]}}"#
     )
 }
 
@@ -272,7 +270,7 @@ fn rules(open_waits: &[(u64, String)]) -> String {
         )
     };
     format!(
-        "- done: cosa e' stato fatto in questa sessione\n- blockers: cosa blocca il lavoro e chi o cosa si aspetta\n- missing: cosa manca ancora per chiudere il lavoro\n- problems: problemi o domande aperte\n- issues_touched: issue GitHub del repo toccate (close = da chiudere, update = da aggiornare, comment = da commentare) con una nota\n- al massimo {MAX_ENTRIES} voci per lista e {MAX_ENTRY_CHARS} caratteri per voce, nessuna stringa vuota\nIn \"blockers\" solo ciò che può sbloccare una persona; non le attese su CI, job o altre macchine.{waits}"
+        "- done: cosa e' stato fatto in questa sessione\n- blockers: cosa blocca il lavoro e chi o cosa si aspetta\n- missing: cosa manca ancora per chiudere il lavoro\n- problems: problemi o domande aperte\n- issues_touched: issue GitHub del repo toccate (close = da chiudere, comment = da commentare) con una nota\n- al massimo {MAX_ENTRIES} voci per lista e {MAX_ENTRY_CHARS} caratteri per voce, nessuna stringa vuota\nIn \"blockers\" solo ciò che può sbloccare una persona; non le attese su CI, job o altre macchine.{waits}"
     )
 }
 
@@ -398,7 +396,7 @@ mod tests {
         }
         let headless = headless_prompt(SID, &[]);
         assert!(headless.contains(TRANSCRIPT_SEPARATOR) && headless.contains("rispondi solo con un oggetto JSON"));
-        assert!(!headless.contains("area"), "{headless}");
+        assert!(!headless.contains("\"area\"") && !headless.contains("aree"), "{headless}");
     }
 
     #[test]

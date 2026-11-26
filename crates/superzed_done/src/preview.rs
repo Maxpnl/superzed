@@ -1,4 +1,4 @@
-//! Anteprima delle modifiche alla board (cosa propone il report, cosa tiene l'utente) e
+//! Anteprima delle modifiche a GitHub (cosa propone il report, cosa tiene l'utente) e
 //! le azioni che ne derivano. Qui nessun `gh`.
 use crate::report::{Report, TouchAction, report_markdown};
 use crate::result::RunResult;
@@ -8,56 +8,23 @@ pub const TITLE_MAX_CHARS: usize = 120;
 pub const BODY_MAX_CHARS: usize = 65_000;
 const GITHUB_TITLE_MAX: usize = 256;
 pub const SUMMARY_KEY: &str = "summary";
+/// Inizio del corpo di un blocker che ha un'attesa nota.
+pub const WAITING_PREFIX: &str = "Waiting on: ";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Task,
-    Question,
-    Blocker,
+/// Parole intere, minuscole, separate da tutto cio' che non e' alfanumerico.
+fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase)
 }
 
-impl Kind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Task => "Task",
-            Kind::Question => "Question",
-            Kind::Blocker => "Blocker",
-        }
-    }
-
-    /// Status con cui la issue nuova entra nella board.
-    pub fn status(self) -> Status {
-        match self {
-            Kind::Blocker => Status::Blocked,
-            Kind::Task | Kind::Question => Status::Backlog,
-        }
-    }
+/// L'attesa e' di una macchina (CI, job, pipeline): la voce non e' un blocker per una persona.
+pub fn machine_wait(waiting_on: &str) -> bool {
+    const MACHINE_WORDS: [&str; 8] = ["ci", "actions", "pipeline", "job", "build", "runner", "cron", "timer"];
+    words(waiting_on).any(|word| MACHINE_WORDS.contains(&word.as_str()))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
-    Backlog,
-    InProgress,
-    Blocked,
-    Done,
-}
-
-impl Status {
-    pub const ALL: [Status; 4] = [Status::Backlog, Status::InProgress, Status::Blocked, Status::Done];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Status::Backlog => "Backlog",
-            Status::InProgress => "In Progress",
-            Status::Blocked => "Blocked",
-            Status::Done => "Done",
-        }
-    }
-
-    pub fn next(self) -> Status {
-        let ix = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
-        Self::ALL[(ix + 1) % Self::ALL.len()]
-    }
+/// L'attesa e' del proprietario del repository: la issue si assegna a chi scrive.
+pub fn owner_wait(waiting_on: &str) -> bool {
+    words(waiting_on).any(|word| word == "owner")
 }
 
 pub fn touched_key(number: u64) -> String {
@@ -85,8 +52,6 @@ pub struct TouchedEntry {
     pub number: u64,
     pub action: TouchAction,
     pub note: String,
-    /// Solo per `update`: lo Status da impostare.
-    pub status: Status,
     pub enabled: bool,
     /// Gia' scritta da un'esecuzione precedente: mostrata, mai rieseguita.
     pub written: bool,
@@ -102,12 +67,13 @@ impl TouchedEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewIssue {
     pub key: String,
-    /// Indice nel marker (`missing`, poi `problems`, poi `blockers`).
+    /// Indice nel marker (`missing`, poi `problems`, poi `blockers`): solo i blocker diventano issue,
+    /// ma gli indici restano quelli di prima, cosi' i marker gia' scritti valgono ancora.
     pub item: usize,
-    pub kind: Kind,
     pub title: String,
     pub body: String,
     pub waiting_on: Option<String>,
+    pub assign_me: bool,
     pub enabled: bool,
     pub written: bool,
 }
@@ -123,7 +89,7 @@ pub struct SummaryEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Preview {
     pub session_id: String,
-    /// Repo della board (`owner/nome`) per i link alle issue; `None` se non noto.
+    /// Repo delle issue (`owner/nome`) per i link alle issue; `None` se non noto.
     pub repo: Option<String>,
     pub touched: Vec<TouchedEntry>,
     pub new_issues: Vec<NewIssue>,
@@ -149,7 +115,6 @@ impl Preview {
                 number: t.number,
                 action: t.action,
                 note: t.note.clone().unwrap_or_default(),
-                status: Status::InProgress,
                 enabled: false,
                 written,
                 key,
@@ -157,22 +122,30 @@ impl Preview {
             entry.enabled = !written && entry.writable();
             touched.push(entry);
         }
-        let texts = report
-            .missing
+        let first_blocker = report.missing.len() + report.problems.len();
+        let new_issues = report
+            .blockers
             .iter()
-            .map(|t| (Kind::Task, t.clone(), None))
-            .chain(report.problems.iter().map(|t| (Kind::Question, t.clone(), None)))
-            .chain(report.blockers.iter().map(|b| (Kind::Blocker, b.title.clone(), b.waiting_on.clone())));
-        let new_issues = texts
             .enumerate()
-            .map(|(item, (kind, text, waiting_on))| {
+            .map(|(offset, blocker)| {
+                let item = first_blocker + offset;
                 let key = new_key(item);
                 let written = previous.is_written(&key);
-                let body = match &waiting_on {
-                    Some(w) => format!("{text}\n\nIn attesa di: {w}"),
-                    None => text.clone(),
+                let body = match &blocker.waiting_on {
+                    Some(waiting_on) => format!("{WAITING_PREFIX}{waiting_on}\n\n{}", blocker.title),
+                    None => blocker.title.clone(),
                 };
-                NewIssue { item, kind, title: title_of(&text), body, waiting_on, enabled: !written, written, key }
+                let machine = blocker.waiting_on.as_deref().is_some_and(machine_wait);
+                NewIssue {
+                    item,
+                    title: title_of(&blocker.title),
+                    body,
+                    assign_me: blocker.waiting_on.as_deref().is_some_and(owner_wait),
+                    waiting_on: blocker.waiting_on.clone(),
+                    enabled: !written && !machine,
+                    written,
+                    key,
+                }
             })
             .collect();
         let summary = (!touched.is_empty()).then(|| {
@@ -206,16 +179,13 @@ pub struct IssueDraft {
     pub title: String,
     /// Corpo senza marker (lo aggiunge `gh::issue_body`).
     pub body: String,
-    pub kind: Kind,
-    pub status: Status,
-    pub waiting_on: Option<String>,
+    pub assign_me: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Issue nuova (o gia' creata da questa sessione: aggiornata).
     Upsert(IssueDraft),
-    SetStatus { key: String, number: u64, status: Status, comment: Option<String> },
     Comment { key: String, number: u64, body: String },
     Close { key: String, number: u64, comment: Option<String> },
 }
@@ -224,7 +194,7 @@ impl Action {
     pub fn key(&self) -> &str {
         match self {
             Action::Upsert(d) => &d.key,
-            Action::SetStatus { key, .. } | Action::Comment { key, .. } | Action::Close { key, .. } => key,
+            Action::Comment { key, .. } | Action::Close { key, .. } => key,
         }
     }
 }
@@ -239,18 +209,13 @@ pub fn actions(p: &Preview) -> Vec<Action> {
             item: n.item,
             title: n.title.trim().to_string(),
             body: n.body.clone(),
-            kind: n.kind,
-            status: n.kind.status(),
-            waiting_on: n.waiting_on.clone(),
+            assign_me: n.assign_me,
         }));
     }
     for t in p.touched.iter().filter(|t| t.enabled && !t.written && t.writable()) {
         let note = Some(t.note.trim().to_string()).filter(|s| !s.is_empty());
         match t.action {
             TouchAction::Close => out.push(Action::Close { key: t.key.clone(), number: t.number, comment: note }),
-            TouchAction::Update => {
-                out.push(Action::SetStatus { key: t.key.clone(), number: t.number, status: t.status, comment: note })
-            }
             TouchAction::Comment => {
                 if let Some(body) = note {
                     out.push(Action::Comment { key: t.key.clone(), number: t.number, body });
@@ -273,7 +238,6 @@ pub fn closes(actions: &[Action]) -> usize {
 pub fn touch_label(action: TouchAction) -> &'static str {
     match action {
         TouchAction::Close => "close",
-        TouchAction::Update => "update the Status",
         TouchAction::Comment => "comment",
     }
 }
@@ -305,7 +269,6 @@ pub fn action_label(a: &Action) -> String {
     match a {
         Action::Upsert(d) => new_issue_label(&d.title),
         Action::Close { number, .. } => touched_label(*number, TouchAction::Close),
-        Action::SetStatus { number, .. } => touched_label(*number, TouchAction::Update),
         Action::Comment { key, .. } if key == SUMMARY_KEY => "Summary".into(),
         Action::Comment { number, .. } => touched_label(*number, TouchAction::Comment),
     }
@@ -347,7 +310,8 @@ pub enum InvalidField {
     Summary,
 }
 
-/// Controlli sulle voci spuntate prima di scrivere (titoli vuoti o troppo lunghi, corpi enormi): il primo campo in errore e il messaggio.
+/// Controlli sulle voci spuntate prima di scrivere (titoli vuoti o troppo lunghi, corpi
+/// enormi): il primo campo in errore e il messaggio.
 pub fn validate_fields(p: &Preview) -> Result<(), (InvalidField, String)> {
     for (ix, n) in p.new_issues.iter().enumerate().filter(|(_, n)| n.enabled && !n.written) {
         if n.title.trim().is_empty() {
@@ -377,7 +341,7 @@ pub fn validate_preview(p: &Preview) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::parse_report;
+    use crate::report::{Blocker, parse_report};
     use crate::result::{FoundIssue, ItemReport, RunResult};
     use crate::test_support::{REPORT_JSON, SID};
 
@@ -395,21 +359,13 @@ mod tests {
         assert_eq!(p.session_id, SID);
         let touched: Vec<(u64, TouchAction, &str, bool)> =
             p.touched.iter().map(|t| (t.number, t.action, t.note.as_str(), t.enabled)).collect();
-        assert_eq!(touched, [(12, TouchAction::Close, "Import completato", true), (8, TouchAction::Update, "Serve l'accesso allo staging", true)]);
-        assert_eq!(p.touched[1].status, Status::InProgress);
-        let new: Vec<(usize, Kind, &str)> = p.new_issues.iter().map(|n| (n.item, n.kind, n.title.as_str())).collect();
-        assert_eq!(
-            new,
-            [
-                (0, Kind::Task, "Test dell'export PDF su Safari"),
-                (1, Kind::Question, "Quale formato per la nota di credito?"),
-                (2, Kind::Blocker, "Policy di annullamento"),
-            ]
-        );
-        assert_eq!(p.new_issues.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(), ["new:0", "new:1", "new:2"]);
-        assert!(p.new_issues.iter().all(|n| n.enabled && !n.written));
-        assert_eq!(p.new_issues[2].body, "Policy di annullamento\n\nIn attesa di: design");
-        assert_eq!(p.new_issues[2].waiting_on.as_deref(), Some("design"));
+        assert_eq!(touched, [(12, TouchAction::Close, "Import completato", true), (8, TouchAction::Comment, "Serve l'accesso allo staging", true)]);
+        let new: Vec<(usize, &str)> = p.new_issues.iter().map(|n| (n.item, n.title.as_str())).collect();
+        assert_eq!(new, [(2, "Policy di annullamento")], "solo i blocker, con l'indice che avevano");
+        assert_eq!(p.new_issues.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(), ["new:2"]);
+        assert!(p.new_issues.iter().all(|n| n.enabled && !n.written && !n.assign_me));
+        assert_eq!(p.new_issues[0].body, "Waiting on: design\n\nPolicy di annullamento");
+        assert_eq!(p.new_issues[0].waiting_on.as_deref(), Some("design"));
         let summary = p.summary.as_ref().expect("riepilogo sull'issue principale");
         assert_eq!(p.summary_target(), Some(12));
         assert!(summary.body.starts_with(&format!("Riepilogo della sessione superzed `{SID}`\n\n## Fatto\n")), "{}", summary.body);
@@ -431,57 +387,51 @@ mod tests {
     #[test]
     fn actions_follow_the_checks_and_the_edits() {
         let mut p = Preview::from_report(&report(), &RunResult::default());
-        p.new_issues[1].enabled = false;
-        p.new_issues[0].title = "  Test Safari  ".into();
-        p.touched[1].status = Status::Blocked;
+        p.new_issues[0].title = "  Policy  ".into();
+        p.new_issues[0].assign_me = true;
         let a = actions(&p);
-        assert_eq!(keys(&a), ["new:0", "new:2", "touched:12", "touched:8", "summary"]);
+        assert_eq!(keys(&a), ["new:2", "touched:12", "touched:8", "summary"]);
         assert_eq!(
             a[0],
             Action::Upsert(IssueDraft {
-                key: "new:0".into(),
-                item: 0,
-                title: "Test Safari".into(),
-                body: "Test dell'export PDF su Safari".into(),
-                kind: Kind::Task,
-                status: Status::Backlog,
-                waiting_on: None,
+                key: "new:2".into(),
+                item: 2,
+                title: "Policy".into(),
+                body: "Waiting on: design\n\nPolicy di annullamento".into(),
+                assign_me: true,
             })
         );
-        match &a[1] {
-            Action::Upsert(d) => assert_eq!((d.kind, d.status, d.waiting_on.as_deref(), d.item), (Kind::Blocker, Status::Blocked, Some("design"), 2)),
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(a[2], Action::Close { key: "touched:12".into(), number: 12, comment: Some("Import completato".into()) });
-        assert_eq!(
-            a[3],
-            Action::SetStatus { key: "touched:8".into(), number: 8, status: Status::Blocked, comment: Some("Serve l'accesso allo staging".into()) }
-        );
-        assert!(matches!(&a[4], Action::Comment { key, number: 12, .. } if key == SUMMARY_KEY));
+        assert_eq!(a[1], Action::Close { key: "touched:12".into(), number: 12, comment: Some("Import completato".into()) });
+        assert_eq!(a[2], Action::Comment { key: "touched:8".into(), number: 8, body: "Serve l'accesso allo staging".into() });
+        assert!(matches!(&a[3], Action::Comment { key, number: 12, .. } if key == SUMMARY_KEY));
+        p.new_issues[0].enabled = false;
         p.summary.as_mut().unwrap().enabled = false;
-        assert!(!keys(&actions(&p)).contains(&"summary"));
+        let a = actions(&p);
+        assert_eq!(keys(&a), ["touched:12", "touched:8"]);
     }
 
     #[test]
     fn written_entries_are_never_redone() {
         let mut previous = RunResult::default();
         previous.record(vec![
-            ItemReport { key: "new:0".into(), result: Ok("https://github.com/acme/acme_app/issues/42".into()), issue: Some(FoundIssue { number: 42, url: "https://github.com/acme/acme_app/issues/42".into() }) },
+            ItemReport { key: "new:2".into(), result: Ok("https://github.com/acme/acme_app/issues/42".into()), issue: Some(FoundIssue { number: 42, url: "https://github.com/acme/acme_app/issues/42".into() }) },
             ItemReport { key: "touched:12".into(), result: Ok("#12 closed".into()), issue: None },
-            ItemReport { key: "new:1".into(), result: Err("gh: HTTP 502".into()), issue: None },
+            ItemReport { key: "touched:8".into(), result: Err("gh: HTTP 502".into()), issue: None },
         ]);
         let p = Preview::from_report(&report(), &previous);
         assert!(p.new_issues[0].written && !p.new_issues[0].enabled);
-        assert!(!p.new_issues[1].written && p.new_issues[1].enabled, "fallita: si riprova");
+        assert!(!p.touched[1].written && p.touched[1].enabled, "fallita: si riprova");
         assert!(p.touched[0].written);
         let mut forced = p;
         forced.new_issues[0].enabled = true; // anche riaccesa a mano, una voce scritta non si riscrive
-        assert_eq!(keys(&actions(&forced)), ["new:1", "new:2", "touched:8", "summary"]);
+        assert_eq!(keys(&actions(&forced)), ["touched:8", "summary"]);
     }
 
     #[test]
     fn validation_of_the_edits() {
-        let mut p = Preview::from_report(&report(), &RunResult::default());
+        let mut r = report();
+        r.blockers.push(Blocker { title: "Seconda attesa".into(), waiting_on: None });
+        let mut p = Preview::from_report(&r, &RunResult::default());
         assert_eq!(validate_preview(&p), Ok(()));
         p.new_issues[1].title = "   ".into();
         assert_eq!(validate_preview(&p), Err("New issue without a title (the second)".into()));
@@ -494,11 +444,11 @@ mod tests {
             Err(format!("New issue “{}…”: the title is longer than 256 characters", "x".repeat(39))),
             "titolo lungo accorciato nel messaggio"
         );
-        p.new_issues[0].title = "Test Safari".into();
-        p.new_issues[2].body = "x".repeat(BODY_MAX_CHARS + 1);
-        assert_eq!(validate_preview(&p), Err("New issue “Policy di annullamento”: the description is longer than 65000 characters".into()));
-        assert_eq!(validate_fields(&p).unwrap_err().0, InvalidField::Body(2));
-        p.new_issues[2].body = "ok".into();
+        p.new_issues[0].title = "Policy".into();
+        p.new_issues[0].body = "x".repeat(BODY_MAX_CHARS + 1);
+        assert_eq!(validate_preview(&p), Err("New issue “Policy”: the description is longer than 65000 characters".into()));
+        assert_eq!(validate_fields(&p).unwrap_err().0, InvalidField::Body(0));
+        p.new_issues[0].body = "ok".into();
         p.summary.as_mut().unwrap().body = "x".repeat(BODY_MAX_CHARS + 1);
         assert_eq!(validate_preview(&p), Err("The summary is longer than 65000 characters".into()));
         assert_eq!(validate_fields(&p).unwrap_err().0, InvalidField::Summary);
@@ -523,8 +473,8 @@ mod tests {
         p.touched[0].note = "  Import completato e verificato  ".into();
         p.touched[1].note = String::new();
         let a = actions(&p);
-        assert_eq!(a[3], Action::Close { key: "touched:12".into(), number: 12, comment: Some("Import completato e verificato".into()) });
-        assert_eq!(a[4], Action::SetStatus { key: "touched:8".into(), number: 8, status: Status::InProgress, comment: None });
+        assert_eq!(a[1], Action::Close { key: "touched:12".into(), number: 12, comment: Some("Import completato e verificato".into()) });
+        assert!(!keys(&a).contains(&"touched:8"), "commento svuotato: niente da scrivere");
         // un commento puro svuotato non si scrive; riempito si scrive col testo nuovo
         let mut r = report();
         r.issues_touched.push(crate::report::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
@@ -550,12 +500,12 @@ mod tests {
         let mut p = Preview::from_report(&r, &RunResult::default());
         p.new_issues[0].title = "Test su Safari".into();
         let a = actions(&p);
-        assert_eq!(item_label("new:0", &a, &r), "New issue “Test su Safari”", "il titolo modificato");
+        assert_eq!(item_label("new:2", &a, &r), "New issue “Test su Safari”", "il titolo modificato");
         assert_eq!(item_label("touched:12", &a, &r), "#12 (close)");
-        assert_eq!(item_label("touched:8", &a, &r), "#8 (update the Status)");
+        assert_eq!(item_label("touched:8", &a, &r), "#8 (comment)");
         assert_eq!(item_label(SUMMARY_KEY, &a, &r), "Summary");
         // voci non scritte da questa scrittura (fallite prima e poi spente): dal report
-        assert_eq!(item_label("new:1", &[], &r), "New issue “Quale formato per la nota di credito?”");
+        assert_eq!(item_label("new:2", &[], &r), "New issue “Policy di annullamento”");
         assert_eq!(item_label("touched:12", &[], &r), "#12 (close)");
         assert_eq!(item_label(SUMMARY_KEY, &[], &r), "Summary");
         assert_eq!(item_label("boh:1", &[], &r), "boh:1");
@@ -597,7 +547,7 @@ mod tests {
         assert!(!fully_written(&r, &RunResult::default()), "niente scritto");
         let mut previous = RunResult::default();
         let ok = |k: &str| ItemReport { key: k.into(), result: Ok("ok".into()), issue: None };
-        previous.record(["new:0", "new:1", "new:2", "touched:12", "touched:8"].map(ok).to_vec());
+        previous.record(["new:2", "touched:12", "touched:8"].map(ok).to_vec());
         assert!(!fully_written(&r, &previous), "manca il riepilogo");
         previous.record(vec![ok(SUMMARY_KEY)]);
         assert!(fully_written(&r, &previous));
@@ -611,8 +561,46 @@ mod tests {
         let t = title_of(&"x".repeat(200));
         assert_eq!(t.chars().count(), TITLE_MAX_CHARS);
         assert!(t.ends_with('…'));
-        assert_eq!(Status::InProgress.next(), Status::Blocked);
-        assert_eq!(Status::Done.next(), Status::Backlog);
-        assert_eq!(Status::ALL.map(Status::name), ["Backlog", "In Progress", "Blocked", "Done"]);
+    }
+
+    #[test]
+    fn only_blockers_become_issues_and_keep_their_marker_index() {
+        let report = parse_report(
+            r#"{"missing":["m0","m1"],"problems":["p0"],"blockers":[
+            {"title":"Vault password","waiting_on":"Alice (owner)"},
+            {"title":"e2e still queued","waiting_on":"GitHub Actions"},
+            {"title":"SECSTORE","waiting_on":"Basis team"},
+            {"title":"No one named"}]}"#,
+            "s-1",
+        )
+        .unwrap();
+        let preview = Preview::from_report(&report, &RunResult::default());
+        let seen: Vec<_> = preview.new_issues.iter().map(|n| (n.item, n.title.as_str(), n.assign_me, n.enabled)).collect();
+        // gli indici restano quelli di prima (missing, problems, blockers): i marker gia' scritti valgono ancora
+        assert_eq!(seen, [(3, "Vault password", true, true), (4, "e2e still queued", false, false), (5, "SECSTORE", false, true), (6, "No one named", false, true)]);
+        assert_eq!(preview.new_issues[0].body, "Waiting on: Alice (owner)\n\nVault password");
+        assert_eq!(preview.new_issues[3].body, "No one named");
+    }
+
+    #[test]
+    fn machine_and_owner_waits() {
+        for w in ["GitHub Actions", "CI", "the nightly job", "build pipeline", "runner"] {
+            assert!(machine_wait(w), "{w}");
+        }
+        for w in ["Alice (owner)", "decisione dell'owner", "Basis team", "HR"] {
+            assert!(!machine_wait(w), "{w}");
+        }
+        for w in ["Alice (owner)", "via dell'owner", "Owner"] {
+            assert!(owner_wait(w), "{w}");
+        }
+        for w in ["Basis team", "ownership review"] {
+            assert!(!owner_wait(w), "{w}");
+        }
+    }
+
+    #[test]
+    fn update_from_an_old_report_is_a_comment() {
+        let report = parse_report(r#"{"issues_touched":[{"number":8,"action":"update","note":"n"}]}"#, "s-1").unwrap();
+        assert_eq!(report.issues_touched[0].action, TouchAction::Comment);
     }
 }

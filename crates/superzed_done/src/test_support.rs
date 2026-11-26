@@ -12,7 +12,7 @@ pub const REPORT_JSON: &str = r#"{"session_id": "11111111-1111-4111-8111-1111111
  "blockers": [{"title": "Policy di annullamento", "waiting_on": "design"}],
  "missing": ["Test dell'export PDF su Safari"],
  "problems": ["Quale formato per la nota di credito?"],
- "issues_touched": [{"number": 12, "action": "close", "note": "Import completato"}, {"number": 8, "action": "update", "note": "Serve l'accesso allo staging"}]}"#;
+ "issues_touched": [{"number": 12, "action": "close", "note": "Import completato"}, {"number": 8, "action": "comment", "note": "Serve l'accesso allo staging"}]}"#;
 
 /// Scrive `<root>/.git/config` con l'origin di acme_app.
 pub fn write_git_origin(root: &Path) {
@@ -21,23 +21,8 @@ pub fn write_git_origin(root: &Path) {
     std::fs::write(dir.join("config"), "[remote \"origin\"]\n\turl = git@github.com:acme/acme_app.git\n").unwrap();
 }
 
-/// `gh project view 3 --owner acme --format json` (forma reale, dati finti).
-pub const PROJECT_VIEW: &str = r#"{"id":"PVT_kwDOA","number":3,"title":"acme-app","url":"https://github.com/orgs/acme/projects/3"}"#;
-
-/// `gh project field-list 3 --owner acme --format json --limit 100`.
-pub const FIELDS: &str = r#"{"fields":[
- {"id":"PVTF_title","name":"Title","type":"ProjectV2Field"},
- {"id":"PVTSSF_status","name":"Status","type":"ProjectV2SingleSelectField","options":[{"id":"st_backlog","name":"Backlog"},{"id":"st_progress","name":"In Progress"},{"id":"st_blocked","name":"Blocked"},{"id":"st_done","name":"Done"}]},
- {"id":"PVTSSF_kind","name":"Kind","type":"ProjectV2SingleSelectField","options":[{"id":"k_deliv","name":"Deliverable"},{"id":"k_task","name":"Task"},{"id":"k_blocker","name":"Blocker"},{"id":"k_question","name":"Question"}]},
- {"id":"PVTSSF_area","name":"Area","type":"ProjectV2SingleSelectField","options":[{"id":"a_frontend","name":"frontend"},{"id":"a_backend","name":"backend"}]},
- {"id":"PVTF_waiting","name":"Waiting on","type":"ProjectV2Field"}
-],"totalCount":5}"#;
-
 /// Stdout di `gh issue create` (e di `gh issue edit`).
 pub const CREATED_URL: &str = "https://github.com/acme/acme_app/issues/42";
-
-/// `gh project item-add … --format json`.
-pub const ITEM_ADDED: &str = r#"{"id":"PVTI_new","title":"x","type":"Issue"}"#;
 
 /// Risposta di `gh issue list --search …` con un marker di `session` per ogni (voce, numero).
 pub fn marker_hits(session: &str, hits: &[(usize, u64)]) -> String {
@@ -54,21 +39,14 @@ pub fn marker_hits(session: &str, hits: &[(usize, u64)]) -> String {
     serde_json::Value::Array(issues).to_string()
 }
 
-/// `gh` finto per la scrittura sulla board di acme/acme_app: nessuna issue gia' creata. Il
-/// numero di Project e' 3 o 0 (quello di `config_for`, finche' la board esiste).
+/// `gh` finto per la scrittura su acme/acme_app: nessuna issue gia' creata.
 pub fn write_runner() -> Arc<FakeRunner> {
     let r = FakeRunner::new();
     r.on("gh auth status", ok(AUTH_OK));
-    r.on("gh project view 3 --owner acme", ok(PROJECT_VIEW));
-    r.on("gh project field-list 3 --owner acme", ok(FIELDS));
+    r.on("gh label create", ok(""));
     r.on("gh issue list --repo acme/acme_app --state all --search=", ok("[]"));
     r.on("gh issue create", ok(&format!("{CREATED_URL}\n")));
     r.on("gh issue edit", ok(&format!("{CREATED_URL}\n")));
-    r.on("gh project item-add 3 --owner acme", ok(ITEM_ADDED));
-    r.on("gh project view 0 --owner acme", ok(PROJECT_VIEW));
-    r.on("gh project field-list 0 --owner acme", ok(FIELDS));
-    r.on("gh project item-add 0 --owner acme", ok(ITEM_ADDED));
-    r.on("gh project item-edit", ok(r#"{"id":"PVTI_new"}"#));
     r.on("gh issue comment", ok("https://github.com/acme/acme_app/issues/12#issuecomment-1\n"));
     r.on("gh issue close", ok(""));
     r

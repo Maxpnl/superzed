@@ -1275,12 +1275,10 @@ pub(crate) mod tests {
         let gh = &chat.gh;
         assert!(gh.calls()[0].line().starts_with("gh auth status"));
         for (needle, n) in [
-            ("gh project view 0 --owner acme", 1),
-            ("gh project field-list 0 --owner acme", 1),
+            ("gh label create blocker -R acme/acme_app", 1),
             ("gh issue list --repo acme/acme_app --state all --search=", 1),
-            ("gh issue create", 3),
-            ("gh project item-add", 4),
-            ("gh project item-edit", 8),
+            ("gh issue create -R acme/acme_app", 1),
+            ("gh project", 0),
             ("gh issue close 12 --repo acme/acme_app --comment=Import completato", 1),
             ("gh issue comment 8 --repo acme/acme_app --body=Serve l'accesso allo staging", 1),
             ("gh issue comment 12 --repo acme/acme_app --body=Riepilogo della sessione superzed", 1),
@@ -1289,9 +1287,9 @@ pub(crate) mod tests {
         }
         assert!(chat.claude.calls().is_empty());
         let result = result_of(&chat);
-        assert_eq!((result.items.len(), result.failed().len(), result.known_issues().len()), (6, 0, 3));
+        assert_eq!((result.items.len(), result.failed().len(), result.known_issues().len()), (4, 0, 1));
         let outcome = notifications(cx).into_iter().find(|n| n.title.starts_with("GitHub updated: ")).expect("notifica di esito");
-        assert_eq!((outcome.severity, outcome.summary.as_str(), outcome.action.clone()), (Severity::Info, "6 items written", None));
+        assert_eq!((outcome.severity, outcome.summary.as_str(), outcome.action.clone()), (Severity::Info, "4 items written", None));
         assert_eq!(chat.canvas.read_with(cx, |c, _| c.done_status(chat.node).map(str::to_string)), Some(STATUS_WRITTEN.into()));
         close_all(&chat.canvas, cx);
     }
@@ -1301,7 +1299,7 @@ pub(crate) mod tests {
         let (chat, cx) = done_chat(cx, true).await;
         with_report(&chat);
         write_all(&review(&chat, cx), cx);
-        assert_eq!(chat.gh.count("gh issue create"), 3);
+        assert_eq!(chat.gh.count("gh issue create"), 1);
         // di nuovo: tutto gia' scritto
         let modal = review(&chat, cx);
         assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 0);
@@ -1309,10 +1307,10 @@ pub(crate) mod tests {
         cx.run_until_parked();
         // esito perso (crash prima del salvataggio): i marker trovati su GitHub evitano i doppioni
         std::fs::remove_file(superzed_done::result_path(chat.dir.path(), SID).unwrap()).unwrap();
-        chat.gh.on("gh issue list --repo acme/acme_app --state all --search=", ok(&marker_hits(SID, &[(0, 40), (1, 41), (2, 42)])));
+        chat.gh.on("gh issue list --repo acme/acme_app --state all --search=", ok(&marker_hits(SID, &[(2, 42)])));
         write_all(&review(&chat, cx), cx);
-        assert_eq!(chat.gh.count("gh issue create"), 3, "nessuna create in piu'");
-        assert_eq!((chat.gh.count("gh issue edit 40"), chat.gh.count("gh issue edit 41"), chat.gh.count("gh issue edit 42")), (1, 1, 1));
+        assert_eq!(chat.gh.count("gh issue create"), 1, "nessuna create in piu'");
+        assert_eq!(chat.gh.count("gh issue edit 42"), 1);
         close_all(&chat.canvas, cx);
     }
 
@@ -1451,7 +1449,7 @@ pub(crate) mod tests {
             Some("Already writing to GitHub for this chat")
         );
         let mid = result_of(&chat);
-        assert!(["new:0", "new:1", "new:2"].iter().all(|k| mid.is_written(k)), "salvate prima della fine: {mid:?}");
+        assert!(mid.is_written("new:2"), "salvata prima della fine: {mid:?}");
         assert!(!mid.is_written("touched:12") && mid.snapshot(SID) == Some(report.clone()));
         // interrotta qui (app chiusa): la riprova rifa' solo il resto, mai i commenti gia' fatti
         let retry = Preview::from_report(&report, &mid);
@@ -1459,9 +1457,9 @@ pub(crate) mod tests {
         open.send(()).unwrap();
         cx.run_until_parked();
         assert!(!cx.update(|_, cx| write_running(&root, SID, cx)));
-        assert_eq!((result_of(&chat).items.len(), result_of(&chat).failed().len()), (6, 0));
+        assert_eq!((result_of(&chat).items.len(), result_of(&chat).failed().len()), (4, 0));
         let outcome = notifications(cx).into_iter().find(|n| n.title.starts_with("GitHub updated: ")).expect("notifica anche senza canvas");
-        assert_eq!(outcome.summary, "6 items written");
+        assert_eq!(outcome.summary, "4 items written");
         assert_eq!((chat.gh.count("gh issue close"), chat.gh.count("gh issue comment 12")), (1, 1));
         close_all(&chat.canvas, cx);
     }
@@ -1531,7 +1529,7 @@ pub(crate) mod tests {
         let modal = review(&chat, cx);
         modal.read_with(cx, |m, cx| {
             assert_eq!(m.warning(), Some(superzed_done::REPORT_CHANGED));
-            assert_eq!(m.preview().new_issues.len(), 3, "le voci della copia");
+            assert_eq!(m.preview().new_issues.len(), 1, "le voci della copia");
             assert_eq!(m.pending(cx), 1, "solo la chiusura fallita");
         });
         redraw(cx);

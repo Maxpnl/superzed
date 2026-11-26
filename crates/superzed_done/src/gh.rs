@@ -1,40 +1,19 @@
-//! Scrittura sulla board con `gh`, solo argv: `auth status`, poi (se servono) id del
-//! progetto e campi, ricerca delle issue gia' create da questa sessione (marker nel
-//! corpo), poi per ogni azione `issue create|edit|comment|close` e `project item-add|item-edit`.
+//! Scrittura su GitHub con `gh`, solo argv: `auth status`, poi (se serve) l'etichetta dei
+//! blocker, ricerca delle issue gia' create da questa sessione (marker nel corpo), poi per
+//! ogni azione `issue create|edit|comment|close`.
 use crate::preview::{Action, IssueDraft};
 use crate::report::safe_session_id;
 use crate::result::{FoundIssue, ItemReport};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
-use superzed_sources::github::{GH_MISSING, GH_SCOPE, PmConfig, check_scopes, classify_gh_error};
+use superzed_sources::github::{GH_MISSING, PmConfig, classify_gh_error};
 use superzed_sources::{RunError, Runner};
 
-pub const FIELD_KIND: &str = "Kind";
-pub const FIELD_STATUS: &str = "Status";
-pub const FIELD_WAITING: &str = "Waiting on";
-const LIST_LIMIT: &str = "100";
+pub const BLOCKER_LABEL: &str = "blocker";
+const BLOCKER_LABEL_DESCRIPTION: &str = "Waiting on a person";
+const BLOCKER_LABEL_COLOR: &str = "D93F0B";
 /// Issue di una sessione: fino a 3 × `MAX_ENTRIES` voci nuove (missing, problems, blockers).
 const MARKER_LIMIT: &str = "1000";
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FieldOption {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct BoardField {
-    pub id: String,
-    pub name: String,
-    /// Vuoto per i campi di testo.
-    pub options: Vec<FieldOption>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Board {
-    pub project_id: String,
-    pub fields: Vec<BoardField>,
-}
 
 pub fn marker(session: &str, item: usize) -> String {
     format!("<!-- superzed:session={session}:item={item} -->")
@@ -60,21 +39,21 @@ pub fn auth_status_args() -> Vec<String> {
     s(&["auth", "status"])
 }
 
-pub fn project_view_args(cfg: &PmConfig) -> Vec<String> {
-    s(&["project", "view", &cfg.project_number.to_string(), "--owner", &cfg.owner, "--format", "json"])
-}
-
-pub fn field_list_args(cfg: &PmConfig) -> Vec<String> {
-    s(&["project", "field-list", &cfg.project_number.to_string(), "--owner", &cfg.owner, "--format", "json", "--limit", LIST_LIMIT])
-}
-
 pub fn marker_search_args(cfg: &PmConfig, session: &str) -> Vec<String> {
     let search = format!("--search=\"{}\" in:body", marker_query(session));
     s(&["issue", "list", "--repo", &cfg.repo, "--state", "all", &search, "--json", "number,url,body", "--limit", MARKER_LIMIT])
 }
 
-pub fn issue_create_args(cfg: &PmConfig, title: &str, body: &str) -> Vec<String> {
-    s(&["issue", "create", "--repo", &cfg.repo, &format!("--title={title}"), &format!("--body={body}")])
+pub fn label_create_args(cfg: &PmConfig) -> Vec<String> {
+    s(&["label", "create", BLOCKER_LABEL, "-R", &cfg.repo, "--description", BLOCKER_LABEL_DESCRIPTION, "--color", BLOCKER_LABEL_COLOR])
+}
+
+pub fn issue_create_args(cfg: &PmConfig, title: &str, body: &str, assign_me: bool) -> Vec<String> {
+    let mut args = s(&["issue", "create", "-R", &cfg.repo, &format!("--title={title}"), &format!("--body={body}"), "--label", BLOCKER_LABEL]);
+    if assign_me {
+        args.extend(s(&["--assignee", "@me"]));
+    }
+    args
 }
 
 pub fn issue_edit_args(cfg: &PmConfig, number: u64, title: &str, body: &str) -> Vec<String> {
@@ -84,28 +63,6 @@ pub fn issue_edit_args(cfg: &PmConfig, number: u64, title: &str, body: &str) -> 
 /// Aggiornamento di una issue per link (una issue creata fuori dal repo della config).
 pub fn issue_edit_url_args(url: &str, title: &str, body: &str) -> Vec<String> {
     s(&["issue", "edit", url, &format!("--title={title}"), &format!("--body={body}")])
-}
-
-pub fn item_add_args(cfg: &PmConfig, url: &str) -> Vec<String> {
-    s(&["project", "item-add", &cfg.project_number.to_string(), "--owner", &cfg.owner, "--url", url, "--format", "json"])
-}
-
-/// Opzione di un campo a scelta (per nome, senza badare a maiuscole) o testo libero.
-pub fn item_edit_args(board: &Board, item_id: &str, field_name: &str, value: &str) -> Result<Vec<String>, String> {
-    let field = find_field(&board.fields, field_name).ok_or_else(|| format!("the board has no “{field_name}” field"))?;
-    let mut args = s(&["project", "item-edit", "--id", item_id, "--project-id", &board.project_id, "--field-id", &field.id]);
-    if field.options.is_empty() {
-        args.push(format!("--text={value}"));
-    } else {
-        let option = field
-            .options
-            .iter()
-            .find(|o| o.name.trim().eq_ignore_ascii_case(value.trim()))
-            .ok_or_else(|| format!("the board field “{}” has no “{value}” option", field.name))?;
-        args.push("--single-select-option-id".into());
-        args.push(option.id.clone());
-    }
-    Ok(args)
 }
 
 pub fn comment_args(cfg: &PmConfig, number: u64, body: &str) -> Vec<String> {
@@ -126,7 +83,7 @@ pub fn in_repo(issue: &FoundIssue, repo: &str) -> bool {
 }
 
 /// Link della issue creata: l'ultima riga `https://…/issues/<n>` dello stdout, solo se e'
-/// di `repo` (un link di un altro repository non si aggiunge mai alla board). Errore con
+/// di `repo` (un link di un altro repository non conta come creato qui). Errore con
 /// la issue quando e' stata creata fuori da `repo`: la riprova la aggiorna, non ne crea un'altra.
 pub fn parse_created_issue(stdout: &str, repo: &str) -> Result<FoundIssue, (String, Option<FoundIssue>)> {
     let url = stdout
@@ -147,49 +104,6 @@ pub fn parse_created_issue(stdout: &str, repo: &str) -> Result<FoundIssue, (Stri
 
 fn foreign_error(issue: &FoundIssue, repo: &str) -> String {
     format!("gh issue create: issue #{} created outside “{repo}”: “{}”", issue.number, issue.url)
-}
-
-fn json_id(json: &str, what: &str) -> Result<String, String> {
-    let v: Value = serde_json::from_str(json).map_err(|_| format!("{what}: non-JSON output"))?;
-    v.get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| format!("{what}: id missing"))
-}
-
-pub fn parse_project_id(json: &str) -> Result<String, String> {
-    json_id(json, "gh project view")
-}
-
-pub fn parse_item_id(json: &str) -> Result<String, String> {
-    json_id(json, "gh project item-add")
-}
-
-pub fn parse_fields(json: &str) -> Result<Vec<BoardField>, String> {
-    let v: Value = serde_json::from_str(json).map_err(|_| "gh project field-list: non-JSON output".to_string())?;
-    let fields = v.get("fields").and_then(Value::as_array).ok_or_else(|| "gh project field-list: “fields” missing".to_string())?;
-    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    Ok(fields
-        .iter()
-        .map(|f| BoardField {
-            id: text(f, "id"),
-            name: text(f, "name"),
-            options: f
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|opts| opts.iter().map(|o| FieldOption { id: text(o, "id"), name: text(o, "name") }).collect())
-                .unwrap_or_default(),
-        })
-        .collect())
-}
-
-fn norm(name: &str) -> String {
-    name.chars().filter(|c| !matches!(c, ' ' | '_')).collect::<String>().to_lowercase()
-}
-
-pub fn find_field<'a>(fields: &'a [BoardField], name: &str) -> Option<&'a BoardField> {
-    fields.iter().find(|f| norm(&f.name) == norm(name))
 }
 
 /// Voci gia' create da `session`: indice del marker → issue (la prima trovata vince).
@@ -216,16 +130,6 @@ pub fn find_markers(json: &str, session: &str) -> Result<BTreeMap<usize, FoundIs
     Ok(found)
 }
 
-/// Per scrivere serve `project`: `read:project` basta solo a leggere la board.
-fn check_write_scope(auth_output: &str) -> Result<(), String> {
-    let Some(line) = auth_output.lines().find(|l| l.contains("Token scopes:")) else {
-        return Ok(());
-    };
-    let scopes = line.split_once("Token scopes:").map(|(_, s)| s).unwrap_or("");
-    let has = scopes.split(',').map(|s| s.trim().trim_matches(['\'', '"'])).any(|s| s == "project");
-    if has { Ok(()) } else { Err(GH_SCOPE.into()) }
-}
-
 /// `gh …`: stdout se riesce, altrimenti un errore leggibile.
 async fn gh(runner: &Arc<dyn Runner>, args: Vec<String>, cfg: &PmConfig) -> Result<String, String> {
     match runner.run("gh", &args, None).await {
@@ -236,82 +140,40 @@ async fn gh(runner: &Arc<dyn Runner>, args: Vec<String>, cfg: &PmConfig) -> Resu
     }
 }
 
-async fn load_board(runner: &Arc<dyn Runner>, cfg: &PmConfig) -> Result<Board, String> {
-    let project_id = parse_project_id(&gh(runner, project_view_args(cfg), cfg).await?)?;
-    let fields = parse_fields(&gh(runner, field_list_args(cfg), cfg).await?)?;
-    Ok(Board { project_id, fields })
-}
-
-/// Valori dei campi della board per una issue nuova (Kind, Status, Waiting on).
-fn draft_fields(d: &IssueDraft) -> Vec<(&'static str, String)> {
-    let mut values = vec![(FIELD_KIND, d.kind.name().to_string()), (FIELD_STATUS, d.status.name().to_string())];
-    if let Some(w) = &d.waiting_on {
-        values.push((FIELD_WAITING, w.clone()));
+/// Crea l'etichetta dei blocker; se esiste gia' va bene.
+pub async fn ensure_label(runner: &Arc<dyn Runner>, cfg: &PmConfig) -> Result<(), String> {
+    match runner.run("gh", &label_create_args(cfg), None).await {
+        Err(RunError::NotFound(_)) => Err(GH_MISSING.into()),
+        Err(RunError::Failed(e)) => Err(format!("gh: {e}")),
+        Ok(out) if out.success => Ok(()),
+        Ok(out) if out.stderr.contains("already exists") => Ok(()),
+        Ok(out) => Err(classify_gh_error(&format!("{}\n{}", out.stderr, out.stdout), cfg)),
     }
-    values
 }
 
-async fn upsert(
-    runner: &Arc<dyn Runner>,
-    cfg: &PmConfig,
-    session: &str,
-    board: &Board,
-    known: &BTreeMap<usize, FoundIssue>,
-    d: &IssueDraft,
-) -> ItemReport {
+async fn upsert(runner: &Arc<dyn Runner>, cfg: &PmConfig, session: &str, known: &BTreeMap<usize, FoundIssue>, d: &IssueDraft) -> ItemReport {
     let report = |result: Result<String, String>, issue: Option<FoundIssue>| ItemReport { key: d.key.clone(), result, issue };
-    // campi e opzioni controllati prima di creare: niente issue a meta' per una board diversa
-    let fields = draft_fields(d);
-    if let Some(e) = fields.iter().find_map(|(f, v)| item_edit_args(board, "-", f, v).err()) {
-        return report(Err(e), None);
-    }
     let body = issue_body(&d.body, session, d.item);
-    let issue = match known.get(&d.item) {
-        // creata fuori dal repo della config: si aggiorna per link, mai sulla board
+    match known.get(&d.item) {
+        // creata fuori dal repo della config: si aggiorna per link
         Some(found) if !in_repo(found, &cfg.repo) => {
             let result = gh(runner, issue_edit_url_args(&found.url, &d.title, &body), cfg)
                 .await
-                .and_then(|_| Err(format!("{} (updated, not added to the board)", foreign_error(found, &cfg.repo))));
-            return report(result, Some(found.clone()));
+                .and_then(|_| Err(format!("{} (updated in place)", foreign_error(found, &cfg.repo))));
+            report(result, Some(found.clone()))
         }
         Some(found) => match gh(runner, issue_edit_args(cfg, found.number, &d.title, &body), cfg).await {
-            Ok(_) => found.clone(),
-            Err(e) => return report(Err(e), Some(found.clone())),
+            Ok(_) => report(Ok(found.url.clone()), Some(found.clone())),
+            Err(e) => report(Err(e), Some(found.clone())),
         },
-        None => match gh(runner, issue_create_args(cfg, &d.title, &body), cfg).await {
-            Err(e) => return report(Err(e), None),
+        None => match gh(runner, issue_create_args(cfg, &d.title, &body, d.assign_me), cfg).await {
+            Err(e) => report(Err(e), None),
             Ok(out) => match parse_created_issue(&out, &cfg.repo) {
-                Ok(created) => created,
-                Err((e, created)) => return report(Err(e), created),
+                Ok(created) => report(Ok(created.url.clone()), Some(created)),
+                Err((e, created)) => report(Err(e), created),
             },
         },
-    };
-    let result = async {
-        let item_id = parse_item_id(&gh(runner, item_add_args(cfg, &issue.url), cfg).await?)?;
-        for (field, value) in &fields {
-            gh(runner, item_edit_args(board, &item_id, field, value)?, cfg).await?;
-        }
-        Ok::<_, String>(issue.url.clone())
     }
-    .await;
-    report(result, Some(issue))
-}
-
-async fn set_status(
-    runner: &Arc<dyn Runner>,
-    cfg: &PmConfig,
-    board: &Board,
-    number: u64,
-    status: crate::preview::Status,
-    comment: Option<&str>,
-) -> Result<String, String> {
-    // item-add restituisce l'elemento gia' sulla board, se c'e'
-    let item_id = parse_item_id(&gh(runner, item_add_args(cfg, &issue_url(&cfg.repo, number)), cfg).await?)?;
-    gh(runner, item_edit_args(board, &item_id, FIELD_STATUS, status.name())?, cfg).await?;
-    if let Some(c) = comment {
-        gh(runner, comment_args(cfg, number, c), cfg).await?;
-    }
-    Ok(format!("#{number} → {}", status.name()))
 }
 
 /// Esegue le azioni in ordine; ogni voce ha il suo esito, consegnato a `on_item` appena
@@ -337,21 +199,15 @@ pub async fn execute(
     if !safe_session_id(&session_id) {
         return fail_all(format!("invalid session id “{}”", session_id.chars().take(64).collect::<String>()));
     }
-    // gh presente, autenticato e con lo scope project (su stdout o stderr secondo la versione)
+    // gh presente e autenticato: lo scope `repo` basta, nessun Project
     match runner.run("gh", &auth_status_args(), None).await {
         Err(RunError::NotFound(_)) => return fail_all(GH_MISSING.into()),
         Err(RunError::Failed(e)) => return fail_all(format!("gh: {e}")),
         Ok(out) if !out.success => return fail_all(classify_gh_error(&format!("{}\n{}", out.stderr, out.stdout), &cfg)),
-        Ok(out) => {
-            let auth = format!("{}\n{}", out.stdout, out.stderr);
-            if let Err(e) = check_scopes(&auth).and_then(|()| check_write_scope(&auth)) {
-                return fail_all(e);
-            }
-        }
+        Ok(_) => {}
     }
-    let needs_board = actions.iter().any(|a| matches!(a, Action::Upsert(_) | Action::SetStatus { .. }));
-    let board = if needs_board { load_board(&runner, &cfg).await } else { Err("board not read".to_string()) };
     let has_new = actions.iter().any(|a| matches!(a, Action::Upsert(_)));
+    let label = if has_new { ensure_label(&runner, &cfg).await } else { Ok(()) };
     let existing = if has_new {
         gh(&runner, marker_search_args(&cfg, &session_id), &cfg)
             .await
@@ -368,17 +224,10 @@ pub async fn execute(
     for action in &actions {
         let key = action.key().to_string();
         let report = match action {
-            Action::Upsert(d) => match (&board, &existing) {
+            Action::Upsert(d) => match (&label, &existing) {
                 (Err(e), _) | (_, Err(e)) => ItemReport { key, result: Err(e.clone()), issue: None },
-                (Ok(b), Ok(found)) => upsert(&runner, &cfg, &session_id, b, found, d).await,
+                (Ok(()), Ok(found)) => upsert(&runner, &cfg, &session_id, found, d).await,
             },
-            Action::SetStatus { number, status, comment, .. } => {
-                let result = match &board {
-                    Err(e) => Err(e.clone()),
-                    Ok(b) => set_status(&runner, &cfg, b, *number, *status, comment.as_deref()).await,
-                };
-                ItemReport { key, result, issue: None }
-            }
             Action::Comment { number, body, .. } => {
                 let result = gh(&runner, comment_args(&cfg, *number, body), &cfg).await.map(|_| format!("comment on #{number}"));
                 ItemReport { key, result, issue: None }
@@ -393,31 +242,20 @@ pub async fn execute(
     }
     out
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preview::{IssueDraft, Kind, Status};
-    use crate::test_support::{CREATED_URL, FIELDS, ITEM_ADDED, PROJECT_VIEW, SID, marker_hits, write_runner};
-    use superzed_sources::test_support::{AUTH_NO_SCOPE, FakeRunner, fail, ok};
+    use crate::preview::IssueDraft;
+    use crate::test_support::{CREATED_URL, SID, marker_hits, write_runner};
+    use superzed_sources::test_support::{FakeRunner, fail, ok};
 
     fn cfg() -> PmConfig {
-        PmConfig { owner: "acme".into(), project_number: 3, repo: "acme/acme_app".into(), stale_days: 14 }
+        PmConfig { owner: "acme".into(), project_number: 0, repo: "acme/acme_app".into(), stale_days: 0 }
     }
 
-    fn board() -> Board {
-        Board { project_id: "PVT_kwDOA".into(), fields: parse_fields(FIELDS).unwrap() }
-    }
-
-    fn draft(item: usize, kind: Kind, title: &str) -> Action {
-        Action::Upsert(IssueDraft {
-            key: format!("new:{item}"),
-            item,
-            title: title.into(),
-            body: format!("corpo di {title}"),
-            kind,
-            status: kind.status(),
-            waiting_on: (kind == Kind::Blocker).then(|| "design".to_string()),
-        })
+    fn draft(item: usize, title: &str, assign_me: bool) -> Action {
+        Action::Upsert(IssueDraft { key: format!("new:{item}"), item, title: title.into(), body: format!("corpo di {title}"), assign_me })
     }
 
     fn run(r: &Arc<FakeRunner>, actions: Vec<Action>, known: BTreeMap<usize, FoundIssue>) -> Vec<ItemReport> {
@@ -434,36 +272,21 @@ mod tests {
 
     #[test]
     fn argv_are_exact_and_user_text_is_one_argument() {
-        assert_eq!(strs(&project_view_args(&cfg())), ["project", "view", "3", "--owner", "acme", "--format", "json"]);
-        assert_eq!(strs(&field_list_args(&cfg())), ["project", "field-list", "3", "--owner", "acme", "--format", "json", "--limit", "100"]);
         assert_eq!(
             strs(&marker_search_args(&cfg(), SID)),
             ["issue", "list", "--repo", "acme/acme_app", "--state", "all", &format!("--search=\"superzed:session={SID}\" in:body"), "--json", "number,url,body", "--limit", "1000"]
         );
-        let hostile = issue_create_args(&cfg(), "--fai-danni", "$(rm -rf ~)\n\"x\" 'y'");
-        assert_eq!(strs(&hostile), ["issue", "create", "--repo", "acme/acme_app", "--title=--fai-danni", "--body=$(rm -rf ~)\n\"x\" 'y'"]);
+        assert_eq!(strs(&label_create_args(&cfg())), ["label", "create", "blocker", "-R", "acme/acme_app", "--description", "Waiting on a person", "--color", "D93F0B"]);
+        let hostile = issue_create_args(&cfg(), "--fai-danni", "$(rm -rf ~)\n\"x\" 'y'", false);
+        assert_eq!(strs(&hostile), ["issue", "create", "-R", "acme/acme_app", "--title=--fai-danni", "--body=$(rm -rf ~)\n\"x\" 'y'", "--label", "blocker"]);
+        let assigned = issue_create_args(&cfg(), "t", "b", true);
+        assert_eq!(strs(&assigned), ["issue", "create", "-R", "acme/acme_app", "--title=t", "--body=b", "--label", "blocker", "--assignee", "@me"]);
         assert_eq!(strs(&issue_edit_args(&cfg(), 40, "t", "b")), ["issue", "edit", "40", "--repo", "acme/acme_app", "--title=t", "--body=b"]);
-        assert_eq!(strs(&item_add_args(&cfg(), CREATED_URL)), ["project", "item-add", "3", "--owner", "acme", "--url", CREATED_URL, "--format", "json"]);
         assert_eq!(strs(&comment_args(&cfg(), 12, "-n")), ["issue", "comment", "12", "--repo", "acme/acme_app", "--body=-n"]);
         assert_eq!(strs(&close_args(&cfg(), 12, None)), ["issue", "close", "12", "--repo", "acme/acme_app"]);
         assert_eq!(strs(&close_args(&cfg(), 12, Some("fatto"))), ["issue", "close", "12", "--repo", "acme/acme_app", "--comment=fatto"]);
         assert_eq!(issue_body("corpo\n\n", SID, 2), format!("corpo\n\n<!-- superzed:session={SID}:item=2 -->"));
         assert_eq!(issue_url("acme/acme_app", 8), "https://github.com/acme/acme_app/issues/8");
-    }
-
-    #[test]
-    fn item_edit_uses_option_ids_or_text() {
-        let b = board();
-        assert_eq!(
-            strs(&item_edit_args(&b, "PVTI_1", FIELD_STATUS, "in progress").unwrap()),
-            ["project", "item-edit", "--id", "PVTI_1", "--project-id", "PVT_kwDOA", "--field-id", "PVTSSF_status", "--single-select-option-id", "st_progress"]
-        );
-        assert_eq!(
-            strs(&item_edit_args(&b, "PVTI_1", "waiting_on", "-design").unwrap()),
-            ["project", "item-edit", "--id", "PVTI_1", "--project-id", "PVT_kwDOA", "--field-id", "PVTF_waiting", "--text=-design"]
-        );
-        assert_eq!(item_edit_args(&b, "PVTI_1", FIELD_KIND, "Epic").unwrap_err(), "the board field “Kind” has no “Epic” option");
-        assert_eq!(item_edit_args(&b, "PVTI_1", "Boh", "x").unwrap_err(), "the board has no “Boh” field");
     }
 
     #[test]
@@ -480,13 +303,6 @@ mod tests {
         assert_eq!(foreign.1, Some(FoundIssue { number: 3, url: "https://github.com/acme/altro/issues/3".into() }), "creata: si ricorda");
         assert_eq!(parse_created_issue("boh", repo).unwrap_err().1, None);
         assert!(parse_created_issue("https://github.com/acme/acme_app/issues/3/x", repo).is_err());
-        assert_eq!(parse_project_id(PROJECT_VIEW).unwrap(), "PVT_kwDOA");
-        assert_eq!(parse_item_id(ITEM_ADDED).unwrap(), "PVTI_new");
-        assert!(parse_item_id("{}").is_err());
-        let fields = parse_fields(FIELDS).unwrap();
-        assert_eq!(fields.len(), 5);
-        assert_eq!(find_field(&fields, "kind").unwrap().options.len(), 4);
-        assert!(parse_fields("[]").is_err());
     }
 
     #[test]
@@ -505,41 +321,53 @@ mod tests {
     }
 
     #[test]
-    fn a_new_issue_is_created_added_and_edited_in_order() {
+    fn a_new_blocker_is_labelled_and_assigned_without_touching_a_project() {
         let r = write_runner();
-        let out = run(&r, vec![draft(2, Kind::Blocker, "Policy")], BTreeMap::new());
-        assert_eq!(out, [ItemReport { key: "new:2".into(), result: Ok(CREATED_URL.into()), issue: Some(FoundIssue { number: 42, url: CREATED_URL.into() }) }]);
+        let out = run(&r, vec![draft(3, "Vault password", true)], BTreeMap::new());
+        assert!(out[0].result.is_ok(), "{out:?}");
+        let l = lines(&r);
+        assert!(l.contains(&"gh label create blocker -R acme/acme_app --description Waiting on a person --color D93F0B".to_string()), "{l:?}");
+        assert!(l.iter().any(|x| x.starts_with("gh issue create -R acme/acme_app") && x.contains("--label blocker --assignee @me")), "{l:?}");
+        assert_eq!(r.count("gh project"), 0);
+    }
+
+    #[test]
+    fn an_existing_label_and_a_token_without_project_scope_are_fine() {
+        let r = write_runner();
+        r.on("gh auth status", ok("Token scopes: 'repo'"));
+        r.on("gh label create", fail(1, "label with name \"blocker\" already exists"));
+        assert!(run(&r, vec![draft(3, "x", false)], BTreeMap::new())[0].result.is_ok());
+    }
+
+    #[test]
+    fn a_new_issue_is_created_once_after_the_label_and_the_search() {
+        let r = write_runner();
+        let out = run(&r, vec![draft(2, "Policy", false), draft(3, "Altra", false)], BTreeMap::new());
+        assert_eq!(out[0], ItemReport { key: "new:2".into(), result: Ok(CREATED_URL.into()), issue: Some(FoundIssue { number: 42, url: CREATED_URL.into() }) });
         let l = lines(&r);
         let heads: Vec<String> = l.iter().map(|l| l.split(' ').take(3).collect::<Vec<_>>().join(" ")).collect();
-        assert_eq!(
-            heads,
-            [
-                "gh auth status", "gh project view", "gh project field-list", "gh issue list", "gh issue create",
-                "gh project item-add", "gh project item-edit", "gh project item-edit", "gh project item-edit",
-            ]
-        );
-        assert!(l[4].contains(&format!("--body=corpo di Policy\n\n{}", marker(SID, 2))), "{}", l[4]);
-        assert!(l[6].ends_with("--single-select-option-id k_blocker"));
-        assert!(l[7].ends_with("--single-select-option-id st_blocked"));
-        assert!(l[8].ends_with("--field-id PVTF_waiting --text=design"));
+        assert_eq!(heads, ["gh auth status", "gh label create", "gh issue list", "gh issue create", "gh issue create"]);
+        assert!(l[3].contains(&format!("--body=corpo di Policy\n\n{}", marker(SID, 2))), "{}", l[3]);
+        assert!(!l[3].contains("--assignee"), "{}", l[3]);
     }
 
     #[test]
     fn an_existing_marker_is_edited_not_recreated() {
         let r = write_runner();
         r.on("gh issue list --repo acme/acme_app --state all --search=", ok(&marker_hits(SID, &[(0, 40)])));
-        let out = run(&r, vec![draft(0, Kind::Task, "Test"), draft(1, Kind::Question, "Formato")], BTreeMap::new());
+        let out = run(&r, vec![draft(0, "Test", false), draft(1, "Formato", false)], BTreeMap::new());
         assert_eq!(out[0].issue.as_ref().map(|i| i.number), Some(40));
         assert_eq!(r.count("gh issue edit 40 --repo acme/acme_app --title=Test"), 1);
         assert_eq!(r.count("gh issue create"), 1, "solo la voce 1, che non c'era");
         assert_eq!(r.count("gh issue list"), 1, "una ricerca per esecuzione");
+        assert_eq!(r.count("gh label create"), 1, "una sola etichetta per esecuzione");
     }
 
     #[test]
     fn known_issues_win_over_the_search() {
         let r = write_runner();
         let known = BTreeMap::from([(0, FoundIssue { number: 42, url: CREATED_URL.into() })]);
-        run(&r, vec![draft(0, Kind::Task, "Test")], known);
+        run(&r, vec![draft(0, "Test", false)], known);
         assert_eq!((r.count("gh issue create"), r.count("gh issue edit 42")), (0, 1));
     }
 
@@ -548,101 +376,75 @@ mod tests {
         let r = write_runner();
         r.on("gh issue list --repo acme/acme_app --state all --search=", fail(1, "HTTP 502: bad gateway"));
         let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
-        let out = run(&r, vec![draft(0, Kind::Task, "Test"), close], BTreeMap::new());
+        let out = run(&r, vec![draft(0, "Test", false), close], BTreeMap::new());
         assert_eq!(out[0].result, Err("search for issues already created failed: gh: HTTP 502: bad gateway".into()));
         assert_eq!(r.count("gh issue create"), 0);
         assert_eq!(out[1].result, Ok("#12 closed".into()), "le altre voci vanno avanti");
     }
 
     #[test]
-    fn a_board_without_the_option_fails_before_creating() {
+    fn a_label_that_cannot_be_created_fails_new_issues_before_creating() {
         let r = write_runner();
-        r.on("gh project field-list 3 --owner acme", ok(&FIELDS.replace(r#"{"id":"k_blocker","name":"Blocker"},"#, "")));
-        let out = run(&r, vec![draft(2, Kind::Blocker, "Policy")], BTreeMap::new());
-        assert_eq!(out[0].result, Err("the board field “Kind” has no “Blocker” option".into()));
-        assert_eq!(r.count("gh issue create"), 0);
-    }
-
-    #[test]
-    fn a_failure_after_creation_keeps_the_issue() {
-        let r = write_runner();
-        r.on("gh project item-add 3 --owner acme", fail(1, "HTTP 502: bad gateway"));
-        let out = run(&r, vec![draft(0, Kind::Task, "Test")], BTreeMap::new());
+        r.on("gh label create", fail(1, "HTTP 502: bad gateway"));
+        let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
+        let out = run(&r, vec![draft(0, "Test", false), close], BTreeMap::new());
         assert_eq!(out[0].result, Err("gh: HTTP 502: bad gateway".into()));
-        assert_eq!(out[0].issue.as_ref().map(|i| i.number), Some(42), "la prossima volta si aggiorna questa");
+        assert_eq!((r.count("gh issue create"), r.count("gh issue edit")), (0, 0));
+        assert_eq!(out[1].result, Ok("#12 closed".into()));
     }
 
     #[test]
-    fn touched_issues_close_comment_and_status() {
+    fn touched_issues_close_and_comment_without_a_label_or_a_search() {
         let r = write_runner();
         let out = run(
             &r,
             vec![
                 Action::Close { key: "touched:12".into(), number: 12, comment: Some("fatto".into()) },
-                Action::SetStatus { key: "touched:8".into(), number: 8, status: Status::Blocked, comment: Some("nota".into()) },
+                Action::Comment { key: "touched:8".into(), number: 8, body: "nota".into() },
                 Action::Comment { key: "summary".into(), number: 12, body: "Riepilogo".into() },
             ],
             BTreeMap::new(),
         );
         assert!(out.iter().all(|o| o.result.is_ok()), "{out:?}");
         let l = lines(&r);
-        assert_eq!(r.count("gh issue list"), 0, "nessuna issue nuova: nessuna ricerca");
+        assert_eq!((r.count("gh issue list"), r.count("gh label create"), r.count("gh project")), (0, 0, 0));
         assert!(l.contains(&"gh issue close 12 --repo acme/acme_app --comment=fatto".to_string()));
-        assert!(l.contains(&"gh project item-add 3 --owner acme --url https://github.com/acme/acme_app/issues/8 --format json".to_string()));
-        assert!(l.iter().any(|x| x.ends_with("--field-id PVTSSF_status --single-select-option-id st_blocked")));
         assert!(l.contains(&"gh issue comment 8 --repo acme/acme_app --body=nota".to_string()));
         assert!(l.contains(&"gh issue comment 12 --repo acme/acme_app --body=Riepilogo".to_string()));
     }
 
     #[test]
-    fn gh_missing_or_without_scope_fails_everything() {
+    fn gh_missing_fails_everything() {
         let r = FakeRunner::new();
         r.on("gh", Err(superzed_sources::RunError::NotFound("gh".into())));
-        let close = || Action::Close { key: "touched:12".into(), number: 12, comment: None };
-        let out = run(&r, vec![close(), draft(0, Kind::Task, "x")], BTreeMap::new());
+        let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
+        let out = run(&r, vec![close, draft(0, "x", false)], BTreeMap::new());
         assert!(out.iter().all(|o| o.result == Err(GH_MISSING.to_string())));
         assert_eq!(r.calls().len(), 1);
-        let r = write_runner();
-        r.on("gh auth status", ok(AUTH_NO_SCOPE));
-        let out = run(&r, vec![close()], BTreeMap::new());
-        assert_eq!(out[0].result, Err(superzed_sources::github::GH_SCOPE.to_string()));
-        assert_eq!(r.count("gh issue close"), 0);
     }
 
     #[test]
-    fn read_only_project_scope_cannot_write() {
-        let r = write_runner();
-        r.on("gh auth status", ok(&superzed_sources::test_support::AUTH_OK.replace("'project'", "'read:project'")));
-        let out = run(&r, vec![Action::Close { key: "touched:12".into(), number: 12, comment: None }], BTreeMap::new());
-        assert_eq!(out[0].result, Err(superzed_sources::github::GH_SCOPE.to_string()));
-        assert_eq!(r.calls().len(), 1);
-    }
-
-    #[test]
-    fn a_foreign_issue_url_is_never_added_to_the_board() {
+    fn a_foreign_issue_url_is_updated_in_place_and_reported() {
         let r = write_runner();
         r.on("gh issue create", ok("https://github.com/evil/other/issues/42\n"));
-        let out = run(&r, vec![draft(0, Kind::Task, "Test")], BTreeMap::new());
+        let out = run(&r, vec![draft(0, "Test", false)], BTreeMap::new());
         let foreign = FoundIssue { number: 42, url: "https://github.com/evil/other/issues/42".into() };
         assert_eq!(out[0].result, Err(format!("gh issue create: issue #42 created outside “acme/acme_app”: “{}”", foreign.url)));
         assert_eq!(out[0].issue, Some(foreign.clone()), "revisione finale 4: la issue creata si ricorda");
-        assert_eq!(r.count("gh project item-add"), 0);
-        // riprova: si aggiorna quella (per link), mai una seconda create, mai sulla board
-        let out = run(&r, vec![draft(0, Kind::Task, "Test")], BTreeMap::from([(0, foreign.clone())]));
+        // riprova: si aggiorna quella (per link), mai una seconda create
+        let out = run(&r, vec![draft(0, "Test", false)], BTreeMap::from([(0, foreign.clone())]));
         assert_eq!(r.count("gh issue create"), 1);
         assert_eq!(r.count(&format!("gh issue edit {} --title=Test", foreign.url)), 1);
-        assert_eq!(r.count("gh project item-add"), 0);
         assert_eq!(out[0].issue, Some(foreign));
-        assert!(out[0].result.as_ref().unwrap_err().contains("not added to the board"), "{out:?}");
+        assert!(out[0].result.as_ref().unwrap_err().contains("created outside"), "{out:?}");
     }
 
     #[test]
     fn a_case_different_repo_is_the_same_repo() {
         let r = write_runner();
         r.on("gh issue create", ok("https://github.com/Acme/Acme_App/issues/42\n"));
-        let out = run(&r, vec![draft(0, Kind::Task, "Test")], BTreeMap::new());
+        let out = run(&r, vec![draft(0, "Test", false)], BTreeMap::new());
         assert!(out[0].result.is_ok(), "{out:?}");
-        assert_eq!(r.count("gh project item-add"), 1);
     }
 
     // Revisione finale 1: ogni voce si consegna appena finita (l'esito si salva voce per voce).
@@ -651,7 +453,7 @@ mod tests {
         let r = write_runner();
         let seen = std::sync::Mutex::new(Vec::new());
         let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
-        let out = futures::executor::block_on(execute(r.clone(), cfg(), SID.into(), vec![draft(0, Kind::Task, "Test"), close], BTreeMap::new(), |item| {
+        let out = futures::executor::block_on(execute(r.clone(), cfg(), SID.into(), vec![draft(0, "Test", false), close], BTreeMap::new(), |item| {
             seen.lock().unwrap().push((item.key.clone(), r.calls().len()));
         }));
         let seen = seen.into_inner().unwrap();
@@ -666,17 +468,6 @@ mod tests {
         assert_eq!(seen.into_inner().unwrap(), 1, "anche gli errori di tutto il giro");
     }
 
-    #[test]
-    fn a_board_that_cannot_be_read_fails_new_issues_before_creating() {
-        let r = write_runner();
-        r.on("gh project field-list 3 --owner acme", fail(1, "HTTP 502: bad gateway"));
-        let close = Action::Close { key: "touched:12".into(), number: 12, comment: None };
-        let out = run(&r, vec![draft(0, Kind::Task, "Test"), close], BTreeMap::new());
-        assert_eq!(out[0].result, Err("gh: HTTP 502: bad gateway".into()));
-        assert_eq!((r.count("gh issue create"), r.count("gh issue edit")), (0, 0));
-        assert_eq!(out[1].result, Ok("#12 closed".into()));
-    }
-
     /// Con la ricerca fallita anche una voce gia' nota non si aggiorna: si riprova dopo
     /// (scelta prudente, nessuna scrittura su dati incompleti).
     #[test]
@@ -684,7 +475,7 @@ mod tests {
         let r = write_runner();
         r.on("gh issue list --repo acme/acme_app --state all --search=", fail(1, "HTTP 502: bad gateway"));
         let known = BTreeMap::from([(0, FoundIssue { number: 42, url: CREATED_URL.into() })]);
-        let out = run(&r, vec![draft(0, Kind::Task, "Test")], known);
+        let out = run(&r, vec![draft(0, "Test", false)], known);
         assert_eq!(out[0].result, Err("search for issues already created failed: gh: HTTP 502: bad gateway".into()));
         assert_eq!((r.count("gh issue create"), r.count("gh issue edit")), (0, 0));
     }

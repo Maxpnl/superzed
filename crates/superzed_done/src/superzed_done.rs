@@ -1,5 +1,5 @@
 //! Pipeline Fatto → GitHub di superzed: report di una chat arrivata in Fatto, anteprima
-//! delle modifiche alla board claude-pm e scrittura con `gh` dopo la conferma. Niente UI.
+//! delle modifiche e scrittura dei blocker come issue con `gh` dopo la conferma. Niente UI.
 pub mod gh;
 pub mod headless;
 pub mod preview;
@@ -9,12 +9,12 @@ pub mod result;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use gh::{execute, marker, marker_query};
+pub use gh::{BLOCKER_LABEL, ensure_label, execute, marker, marker_query};
 pub use repo::{config_for, parse_github_repo, repo_of};
 pub use preview::{
-    Action, BODY_MAX_CHARS, InvalidField, IssueDraft, Kind, NewIssue, Preview, SUMMARY_KEY, Status, SummaryEntry,
-    TITLE_MAX_CHARS, TouchedEntry, action_label, actions, closes, fully_written, item_label, new_key, ordinal, title_of,
-    touch_label, touched_key, validate_fields, validate_preview,
+    Action, BODY_MAX_CHARS, InvalidField, IssueDraft, NewIssue, Preview, SUMMARY_KEY, SummaryEntry, TITLE_MAX_CHARS,
+    TouchedEntry, WAITING_PREFIX, action_label, actions, closes, fully_written, item_label, machine_wait, new_key, ordinal,
+    owner_wait, title_of, touch_label, touched_key, validate_fields, validate_preview,
 };
 pub use report::{
     Blocker, MAX_ENTRIES, MAX_ENTRY_CHARS, REPORTS_DIR, Report, TRANSCRIPT_SEPARATOR, TouchAction, TouchedIssue,
@@ -150,17 +150,17 @@ mod tests {
         ensure_reports_dir(dir.path()).unwrap();
         let preview = Preview::from_report(&report, &RunResult::default());
         let spy = Arc::new(Spy { inner: write_runner(), path: path.clone(), seen: Default::default() });
-        let cfg = superzed_sources::github::PmConfig { owner: "acme".into(), project_number: 3, repo: "acme/acme_app".into(), stale_days: 14 };
+        let cfg = superzed_sources::github::PmConfig { owner: "acme".into(), project_number: 0, repo: "acme/acme_app".into(), stale_days: 0 };
         let run = futures::executor::block_on(write_and_save(spy.clone(), cfg, &report, actions(&preview), RunResult::default(), path.clone()));
         let at_close = spy.seen.lock().unwrap()[0].clone();
-        assert!(["new:0", "new:1", "new:2"].iter().all(|k| at_close.is_written(k)), "{at_close:?}");
+        assert!(at_close.is_written("new:2"), "{at_close:?}");
         assert!(!at_close.is_written("touched:12"));
         assert_eq!(at_close.snapshot(SID), Some(report.clone()), "copia del report salvata prima della prima voce");
         // interrotta qui: la riprova rifa' solo il resto
         let retry = Preview::from_report(&report, &at_close);
         assert_eq!(actions(&retry).iter().map(Action::key).collect::<Vec<_>>(), ["touched:12", "touched:8", "summary"]);
-        assert_eq!((run.reports.len(), run.save_error.clone()), (6, None));
+        assert_eq!((run.reports.len(), run.save_error.clone()), (4, None));
         assert_eq!(RunResult::read(&path), run.result);
-        assert!(run.result.failed().is_empty() && run.result.items.len() == 6);
+        assert!(run.result.failed().is_empty() && run.result.items.len() == 4);
     }
 }
