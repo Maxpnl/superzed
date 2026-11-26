@@ -1,16 +1,19 @@
 //! Socket Unix locale di superzed: riceve dagli script di claude un header
-//! (`superzed1 <canale> <chiave> <token>`) e un corpo. Tre canali: `hook` e `status`
-//! (il JSON di Claude Code, fino a `MAX_PAYLOAD`) e `notify` (le notifiche di
-//! `superzed-notify`, fino a `MAX_NOTIFY_PAYLOAD`; un corpo non JSON arriva come testo).
-use std::io::{BufRead as _, BufReader, Read as _};
+//! (`superzed1 <canale> <chiave> <token>`) e un corpo. Quattro canali: `hook` e `status`
+//! (il JSON di Claude Code, fino a `MAX_PAYLOAD`), `notify` (le notifiche di
+//! `superzed-notify`, fino a `MAX_NOTIFY_PAYLOAD`; un corpo non JSON arriva come testo) e
+//! `wait` (a due vie: una riga JSON, e chi riceve il messaggio risponde con `IpcReply`).
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 pub const MAX_PAYLOAD: usize = 1 << 20;
 /// Limite del corpo del canale `notify` (i dettagli possono essere lunghi).
 pub const MAX_NOTIFY_PAYLOAD: usize = 4 << 20;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+const REPLY_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// `sun_path` di macOS e' 104 byte: si resta sotto con margine.
 const MAX_SOCKET_PATH: usize = 100;
 
@@ -19,6 +22,39 @@ pub enum Channel {
     Hook,
     Status,
     Notify,
+    Wait,
+}
+
+/// La connessione di un messaggio `wait`, su cui rispondere una sola volta.
+#[derive(Clone)]
+pub struct IpcReply(Arc<Mutex<Option<UnixStream>>>);
+
+impl IpcReply {
+    pub fn new(stream: UnixStream) -> Self {
+        Self(Arc::new(Mutex::new(Some(stream))))
+    }
+
+    /// Scrive `line` e `\n` e chiude la connessione; dalla seconda chiamata non fa niente.
+    pub fn send(&self, line: &str) {
+        let stream = self.0.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let Some(mut stream) = stream else { return };
+        if let Err(error) = stream.write_all(format!("{line}\n").as_bytes()).and_then(|()| stream.flush()) {
+            log::debug!("superzed ipc: reply not delivered: {error}");
+        }
+    }
+}
+
+impl std::fmt::Debug for IpcReply {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IpcReply")
+    }
+}
+
+// due messaggi si confrontano per contenuto: la connessione non conta
+impl PartialEq for IpcReply {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +62,8 @@ pub struct IpcMessage {
     pub channel: Channel,
     pub node_key: String,
     pub payload: serde_json::Value,
+    /// `Some` solo per `Channel::Wait`.
+    pub reply: Option<IpcReply>,
 }
 
 fn valid_word(s: &str) -> bool {
@@ -43,6 +81,7 @@ pub fn parse_header(line: &str, token: &str) -> Option<(Channel, String)> {
         "hook" => Channel::Hook,
         "status" => Channel::Status,
         "notify" => Channel::Notify,
+        "wait" => Channel::Wait,
         _ => return None,
     };
     (valid_word(key) && valid_word(tok) && tok == token).then(|| (channel, key.to_string()))
@@ -115,6 +154,7 @@ fn read_message(stream: UnixStream, token: &str) -> Option<IpcMessage> {
     if let Err(e) = stream.set_read_timeout(Some(READ_TIMEOUT)) {
         log::debug!("superzed ipc: read timeout not set: {e}");
     }
+    let reply_stream = stream.try_clone().ok();
     let mut reader = BufReader::new(stream.take(MAX_NOTIFY_PAYLOAD as u64 + 257));
     let mut header = String::new();
     reader.read_line(&mut header).ok()?;
@@ -123,10 +163,18 @@ fn read_message(stream: UnixStream, token: &str) -> Option<IpcMessage> {
     }
     let (channel, node_key) = parse_header(&header, token)?;
     let mut body = Vec::new();
-    reader.read_to_end(&mut body).ok()?;
+    if channel == Channel::Wait {
+        // `nc` di macOS non chiude la sua meta' in scrittura a fine stdin: il corpo e' una riga
+        reader.read_until(b'\n', &mut body).ok()?;
+        if body.last() != Some(&b'\n') {
+            return None;
+        }
+    } else {
+        reader.read_to_end(&mut body).ok()?;
+    }
     let limit = match channel {
         Channel::Notify => MAX_NOTIFY_PAYLOAD,
-        Channel::Hook | Channel::Status => MAX_PAYLOAD,
+        Channel::Hook | Channel::Status | Channel::Wait => MAX_PAYLOAD,
     };
     if body.len() > limit {
         return None;
@@ -139,15 +187,21 @@ fn read_message(stream: UnixStream, token: &str) -> Option<IpcMessage> {
     } else {
         serde_json::from_slice(&body).ok()?
     };
-    Some(IpcMessage { channel, node_key, payload })
+    let reply = if channel == Channel::Wait {
+        let reply_stream = reply_stream?;
+        if let Err(e) = reply_stream.set_write_timeout(Some(REPLY_WRITE_TIMEOUT)) {
+            log::debug!("superzed ipc: write timeout not set: {e}");
+        }
+        Some(IpcReply::new(reply_stream))
+    } else {
+        None
+    };
+    Some(IpcMessage { channel, node_key, payload, reply })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
-    use std::os::unix::net::UnixStream;
-    use std::time::Duration;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -268,5 +322,37 @@ mod tests {
         send(&path, format!("superzed1 notify node-2 {TOKEN}\n{big}").as_bytes());
         let msg = recv(&rx).expect("solo la notifica passa");
         assert_eq!((msg.channel, msg.node_key.as_str()), (Channel::Notify, "node-2"));
+    }
+
+    #[test]
+    fn a_wait_message_can_be_answered_on_the_same_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, rx) = IpcServer::start(dir.path().join("s.sock"), TOKEN.into()).unwrap();
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        write!(client, "superzed1 wait k-1 {TOKEN}\n{{\"title\":\"x\",\"on\":\"me\"}}\n").unwrap();
+        let msg = recv(&rx).expect("attesa");
+        assert_eq!((msg.channel, msg.payload["title"].as_str()), (Channel::Wait, Some("x")));
+        msg.reply.clone().unwrap().send("ok #212 https://github.com/acme/acme_app/issues/212");
+        msg.reply.unwrap().send("ignored");
+        let mut answer = String::new();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client.read_to_string(&mut answer).unwrap();
+        assert_eq!(answer, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+    }
+
+    #[test]
+    fn other_channels_carry_no_reply_and_a_wait_body_must_be_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.sock");
+        let (_server, rx) = IpcServer::start(path.clone(), TOKEN.into()).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        write!(client, "superzed1 wait k-1 {TOKEN}\nnot json\n").unwrap();
+        let mut answer = String::new();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client.read_to_string(&mut answer).unwrap();
+        assert_eq!(answer, "", "messaggio scartato e connessione chiusa");
+        send(&path, format!("superzed1 hook node-1 {TOKEN}\n{{}}\n").as_bytes());
+        let msg = recv(&rx).expect("solo l'hook passa");
+        assert_eq!((msg.channel, msg.reply), (Channel::Hook, None));
     }
 }

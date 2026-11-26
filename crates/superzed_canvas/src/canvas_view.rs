@@ -4433,7 +4433,7 @@ mod tests {
     }
 
     pub(super) fn hook(key: &str, payload: serde_json::Value) -> superzed_ipc::IpcMessage {
-        superzed_ipc::IpcMessage { channel: superzed_ipc::Channel::Hook, node_key: key.into(), payload }
+        superzed_ipc::IpcMessage { channel: superzed_ipc::Channel::Hook, node_key: key.into(), payload, reply: None }
     }
 
     // `debug_bounds` vuole `&'static str` (upstream): per un selettore costruito a
@@ -4910,6 +4910,7 @@ mod tests {
                     channel: superzed_ipc::Channel::Status,
                     node_key: "k-3".into(),
                     payload: json!({"context_window": {"remaining_percentage": 55}}),
+                    reply: None,
                 },
                 cx,
             );

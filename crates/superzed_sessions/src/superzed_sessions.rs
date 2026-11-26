@@ -12,4 +12,4 @@ pub use model::{
     WAKEUP_ID, apply_hook, apply_status, attention, now_unix, now_unix_ms, priority_rank,
 };
 pub use phase::{Phase, SavedSession, advance, phase_for_event};
-pub use store::{SessionEvent, SessionStore, init, init_test};
+pub use store::{SessionEvent, SessionStore, WaitRouter, init, init_test};

@@ -809,6 +809,7 @@ mod tests {
                     channel: superzed_ipc::Channel::Status,
                     node_key: "k".into(),
                     payload: serde_json::json!({"rate_limits": {"five_hour": {"used_percentage": 64, "resets_at": 4070908800i64}}}),
+                    reply: None,
                 },
                 cx,
             );
@@ -847,6 +848,7 @@ mod tests {
                     channel: superzed_ipc::Channel::Status,
                     node_key: "k".into(),
                     payload: serde_json::json!({"rate_limits": {"five_hour": {"used_percentage": used, "resets_at": resets_at}}}),
+                    reply: None,
                 },
                 cx,
             );

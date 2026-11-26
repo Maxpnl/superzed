@@ -249,6 +249,7 @@ mod tests {
                     channel: superzed_ipc::Channel::Status,
                     node_key: "k0".into(),
                     payload: json!({"context_window": {"remaining_percentage": 70}}),
+                    reply: None,
                 },
                 cx,
             )

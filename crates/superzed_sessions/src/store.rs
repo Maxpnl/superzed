@@ -5,7 +5,7 @@ use crate::model::{self, Session, SessionState};
 use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use std::path::{Path, PathBuf};
-use superzed_ipc::{Channel, IpcMessage, IpcServer};
+use superzed_ipc::{Channel, IpcMessage, IpcReply, IpcServer};
 use util::ResultExt as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,8 +200,8 @@ impl SessionStore {
                     cx.emit(SessionEvent::RateLimits { key: msg.node_key.clone() });
                 }
             }
-            // le notifiche vanno al `NotifyRouter` (arriva qui solo chiamando `apply` direttamente)
-            Channel::Notify => return,
+            // notifiche e attese vanno ai loro router (arrivano qui solo chiamando `apply` direttamente)
+            Channel::Notify | Channel::Wait => return,
         }
         if msg.channel == Channel::Hook {
             log::debug!(
@@ -265,8 +265,24 @@ pub fn is_interrupt_key(keystroke: &gpui::Keystroke) -> bool {
 pub struct NotifyRouter(pub fn(&str, serde_json::Value, &mut App));
 impl Global for NotifyRouter {}
 
-/// Un messaggio dal socket: le notifiche al router, il resto allo store.
+/// Destinatario dei messaggi del canale `wait`: deve rispondere sul `IpcReply`
+/// (`ok #<numero> <url>` oppure `error: <messaggio>`).
+pub struct WaitRouter(pub fn(&str, serde_json::Value, IpcReply, &mut App));
+impl Global for WaitRouter {}
+
+/// Un messaggio dal socket: notifiche e attese ai router, il resto allo store.
 pub fn dispatch(msg: IpcMessage, store: &Entity<SessionStore>, cx: &mut App) {
+    if msg.channel == Channel::Wait {
+        let Some(reply) = msg.reply else {
+            log::warn!("superzed: wait from {} has no connection to answer on", msg.node_key);
+            return;
+        };
+        match cx.try_global::<WaitRouter>().map(|r| r.0) {
+            Some(route) => route(&msg.node_key, msg.payload, reply, cx),
+            None => reply.send("error: superzed cannot take waits right now"),
+        }
+        return;
+    }
     if msg.channel == Channel::Notify {
         match cx.try_global::<NotifyRouter>().map(|r| r.0) {
             Some(route) => route(&msg.node_key, msg.payload, cx),
@@ -336,7 +352,7 @@ mod tests {
     use superzed_ipc::{Channel, IpcMessage};
 
     fn msg(key: &str, channel: Channel, payload: serde_json::Value) -> IpcMessage {
-        IpcMessage { channel, node_key: key.into(), payload }
+        IpcMessage { channel, node_key: key.into(), payload, reply: None }
     }
 
     #[gpui::test]
@@ -355,6 +371,42 @@ mod tests {
         });
         ROUTED.with(|r| assert_eq!(*r.borrow(), vec![("k1".to_string(), serde_json::json!({"title": "x"}))]));
         assert_eq!(store.read_with(cx, |s, _| s.get("k1").unwrap().state.clone()), SessionState::Working, "l'hook arriva allo store");
+    }
+
+    #[gpui::test]
+    fn wait_messages_go_to_the_router_or_get_an_error_line(cx: &mut TestAppContext) {
+        thread_local! { static ROUTED: std::cell::RefCell<Vec<String>> = Default::default(); }
+        fn route(key: &str, _: serde_json::Value, reply: IpcReply, _: &mut App) {
+            ROUTED.with(|r| r.borrow_mut().push(key.to_string()));
+            reply.send("ok #7 https://github.com/acme/acme_app/issues/7");
+        }
+        fn wait_message(key: &str) -> (IpcMessage, std::os::unix::net::UnixStream) {
+            let (server_side, client_side) = std::os::unix::net::UnixStream::pair().unwrap();
+            let message = IpcMessage {
+                channel: Channel::Wait,
+                node_key: key.into(),
+                payload: serde_json::json!({"title": "x", "on": "me"}),
+                reply: Some(IpcReply::new(server_side)),
+            };
+            (message, client_side)
+        }
+        fn answer(mut client: std::os::unix::net::UnixStream) -> String {
+            use std::io::Read as _;
+            let mut text = String::new();
+            client.read_to_string(&mut text).unwrap();
+            text
+        }
+        let store = cx.update(|cx| init_test(cx, "/tmp/cfg".into(), None));
+        let (message, client) = wait_message("k1");
+        cx.update(|cx| dispatch(message, &store, cx));
+        assert_eq!(answer(client), "error: superzed cannot take waits right now\n");
+        let (message, client) = wait_message("k2");
+        cx.update(|cx| {
+            cx.set_global(WaitRouter(route));
+            dispatch(message, &store, cx);
+        });
+        assert_eq!(answer(client), "ok #7 https://github.com/acme/acme_app/issues/7\n");
+        ROUTED.with(|r| assert_eq!(*r.borrow(), vec!["k2".to_string()]));
     }
 
     #[gpui::test]

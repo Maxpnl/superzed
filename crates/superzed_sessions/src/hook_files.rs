@@ -41,20 +41,10 @@ fi
 exit 0
 "#;
 
-/// Nome dello script delle notifiche, in `<dir>/bin` (cartella messa nel `PATH` di claude).
-pub const NOTIFY_SCRIPT: &str = "superzed-notify";
-
-const NOTIFY_SH: &str = r#"#!/bin/sh
-# superzed-notify: manda una notifica a superzed (JSON su stdin, oppure argomenti)
-usage() {
-  echo "usage: superzed-notify < notification.json" >&2
-  echo "       superzed-notify --severity note|info|warning|error|critical --title T [--summary S] [--details-file F] [--suggested-prompt P]" >&2
-}
-if [ -z "${SUPERZED_NODE-}" ] || [ -z "${SUPERZED_HOOK_TOKEN-}" ] || [ ! -S "${SUPERZED_HOOK_SOCK-}" ]; then
-  echo "superzed-notify: superzed not reachable (SUPERZED_NODE, the token or the socket is missing)" >&2
-  exit 1
-fi
-# tutto a byte: in un locale UTF-8 sed rifiuta i byte non validi e non stampa niente
+/// Il `json_str` degli script che costruiscono JSON dagli argomenti (notify e wait).
+macro_rules! json_str_sh {
+    () => {
+        r#"# tutto a byte: in un locale UTF-8 sed rifiuta i byte non validi e non stampa niente
 LC_ALL=C
 export LC_ALL
 # stdin -> stringa JSON: prima UTF-8 valido (via byte non validi e un carattere spezzato da
@@ -65,7 +55,27 @@ json_str() {
     | /usr/bin/sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/$(printf '\t')/\\\\t/g" \
     | /usr/bin/awk 'BEGIN { printf "\"" } { if (NR > 1) printf "%s", "\\n"; printf "%s", $0 } END { printf "\"" }'
 }
-if [ $# -eq 0 ]; then
+"#
+    };
+}
+
+/// Nome dello script delle notifiche, in `<dir>/bin` (cartella messa nel `PATH` di claude).
+pub const NOTIFY_SCRIPT: &str = "superzed-notify";
+
+const NOTIFY_SH: &str = concat!(
+    r#"#!/bin/sh
+# superzed-notify: manda una notifica a superzed (JSON su stdin, oppure argomenti)
+usage() {
+  echo "usage: superzed-notify < notification.json" >&2
+  echo "       superzed-notify --severity note|info|warning|error|critical --title T [--summary S] [--details-file F] [--suggested-prompt P]" >&2
+}
+if [ -z "${SUPERZED_NODE-}" ] || [ -z "${SUPERZED_HOOK_TOKEN-}" ] || [ ! -S "${SUPERZED_HOOK_SOCK-}" ]; then
+  echo "superzed-notify: superzed not reachable (SUPERZED_NODE, the token or the socket is missing)" >&2
+  exit 1
+fi
+"#,
+    json_str_sh!(),
+    r#"if [ $# -eq 0 ]; then
   if [ -t 0 ]; then usage; exit 1; fi
   # un byte oltre il limite per accorgersi del troppo (niente JSON troncato)
   body=$(/usr/bin/head -c 4194305)
@@ -103,7 +113,66 @@ else
   echo "superzed-notify: sending failed" >&2
   exit 1
 fi
-"#;
+"#
+);
+
+/// Nome dello script delle attese, in `<dir>/bin`.
+pub const WAIT_SCRIPT: &str = "superzed-wait";
+
+const WAIT_SH: &str = concat!(
+    r#"#!/bin/sh
+# superzed-wait: chiede a superzed di registrare un'attesa e stampa la issue aperta
+usage() {
+  echo "usage: superzed-wait --on me|<who> --title T [--detail D]" >&2
+}
+if [ -z "${SUPERZED_NODE-}" ] || [ -z "${SUPERZED_HOOK_TOKEN-}" ] || [ ! -S "${SUPERZED_HOOK_SOCK-}" ]; then
+  echo "superzed-wait: superzed not reachable (SUPERZED_NODE, the token or the socket is missing)" >&2
+  exit 1
+fi
+"#,
+    json_str_sh!(),
+    r#"on="" title="" detail=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --on|--title|--detail)
+      if [ $# -lt 2 ]; then echo "superzed-wait: missing value for $1" >&2; usage; exit 1; fi
+      case "$1" in
+        --on) on=$2 ;;
+        --title) title=$2 ;;
+        --detail) detail=$2 ;;
+      esac
+      shift 2 ;;
+    *) echo "superzed-wait: unknown argument: $1" >&2; usage; exit 1 ;;
+  esac
+done
+if [ -z "$on" ] || [ -z "$title" ]; then usage; exit 1; fi
+body="{\"title\":$(printf '%s' "$title" | json_str),\"on\":$(printf '%s' "$on" | json_str)"
+if [ -n "$detail" ]; then body="$body,\"detail\":$(printf '%s' "$detail" | json_str)"; fi
+body="$body}"
+# lo stato d'uscita di nc non conta: nc diversi escono 0 o no a timeout scaduto, conta la risposta
+answer=$(printf 'superzed1 wait %s %s\n%s\n' "$SUPERZED_NODE" "$SUPERZED_HOOK_TOKEN" "$body" \
+  | /usr/bin/nc -U -w "${SUPERZED_WAIT_TIMEOUT:-30}" "$SUPERZED_HOOK_SOCK" 2>/dev/null \
+  | /usr/bin/head -n 1)
+case "$answer" in
+  "ok "*) echo "waiting registered: ${answer#ok }" ;;
+  "error: "*) echo "superzed-wait: ${answer#error: }" >&2; exit 1 ;;
+  "") echo "superzed-wait: no answer from superzed, the wait is NOT registered" >&2; exit 1 ;;
+  *) echo "superzed-wait: unexpected answer from superzed: $answer" >&2; exit 1 ;;
+esac
+"#
+);
+
+/// Regola annunciata alle chat a SessionStart (lo stdout di un hook entra nel contesto).
+pub const WAIT_RULE: &str = "Per segnalare un'attesa: `superzed-wait --on me --title \"…\" [--detail \"…\"]` (al posto di `me`, il nome di chi si aspetta). Usalo solo quando non puoi proseguire su un pezzo del lavoro perché serve una persona fuori da questa sessione: una credenziale o un accesso che manca, un via esplicito dell'owner a un merge o a un deploy, una risposta di un altro team. Non usarlo per attese su macchine, per domande di design o per cose rimandate. Quando l'attesa si scioglie, chiudi la issue con `gh issue close`.";
+
+const WAIT_CONTEXT_FILE: &str = "wait-context.sh";
+
+fn wait_context_script() -> String {
+    format!(
+        "#!/bin/sh\n# superzed: a SessionStart lo stdout dell'hook entra nel contesto della chat\ncat >/dev/null 2>&1\nif [ -n \"${{SUPERZED_NODE-}}\" ]; then\n  cat <<'SUPERZED_WAIT_RULE'\n{WAIT_RULE}\nSUPERZED_WAIT_RULE\nfi\nexit 0\n"
+    )
+}
 
 pub fn hook_script() -> &'static str {
     HOOK_SH
@@ -122,10 +191,12 @@ pub fn settings_json(dir: &Path) -> serde_json::Value {
     let hook = format!("sh {} hook", shell_quote(&format!("{dir}/hook.sh")));
     let mut hooks = serde_json::Map::new();
     for event in HOOK_EVENTS {
-        hooks.insert(
-            event.to_string(),
-            serde_json::json!([{ "hooks": [{ "type": "command", "command": hook }] }]),
-        );
+        let mut commands = vec![serde_json::json!({ "type": "command", "command": hook })];
+        if *event == "SessionStart" {
+            let wait_context = format!("sh {}", shell_quote(&format!("{dir}/{WAIT_CONTEXT_FILE}")));
+            commands.push(serde_json::json!({ "type": "command", "command": wait_context }));
+        }
+        hooks.insert(event.to_string(), serde_json::json!([{ "hooks": commands }]));
     }
     serde_json::json!({
         "hooks": hooks,
@@ -143,7 +214,7 @@ fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
     std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Scrive i tre file in `dir` e `dir/bin/superzed-notify`; ritorna il path di `settings.json`.
+/// Scrive i file degli hook in `dir` e `dir/bin/superzed-notify` e `dir/bin/superzed-wait`; ritorna il path di `settings.json`.
 pub fn write_hook_files(dir: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     write_if_changed(&dir.join("hook.sh"), HOOK_SH)?;
@@ -152,10 +223,15 @@ pub fn write_hook_files(dir: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(&bin)?;
     let notify = bin.join(NOTIFY_SCRIPT);
     write_if_changed(&notify, NOTIFY_SH)?;
-    // sempre, anche se il contenuto non e' cambiato: claude lo esegue per nome dal PATH
+    let wait = bin.join(WAIT_SCRIPT);
+    write_if_changed(&wait, WAIT_SH)?;
+    write_if_changed(&dir.join(WAIT_CONTEXT_FILE), &wait_context_script())?;
+    // sempre, anche se il contenuto non e' cambiato: claude li esegue per nome dal PATH
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&notify, std::fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("permissions of {}", notify.display()))?;
+    for script in [&notify, &wait] {
+        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("permissions of {}", script.display()))?;
+    }
     let settings = dir.join("settings.json");
     write_if_changed(&settings, &serde_json::to_string_pretty(&settings_json(dir))?)?;
     Ok(settings)
@@ -412,5 +488,111 @@ mod tests {
         let out = run(&dir.path().join("statusline.sh"), None, &env2, input);
         assert_eq!(String::from_utf8_lossy(&out.stdout), input, "la status line utente riceve lo stesso stdin");
         assert!(recv(&rx).is_some());
+    }
+
+    // Risponde (o no) al prossimo messaggio; ritorna il messaggio dopo la fine dello script, cosi'
+    // senza risposta la connessione resta aperta finche' lo script non ha finito.
+    fn answer_next_message(
+        rx: smol::channel::Receiver<superzed_ipc::IpcMessage>,
+        answer: Option<&'static str>,
+    ) -> std::thread::JoinHandle<Option<superzed_ipc::IpcMessage>> {
+        std::thread::spawn(move || {
+            let msg = recv(&rx)?;
+            if let (Some(answer), Some(reply)) = (answer, msg.reply.as_ref()) {
+                reply.send(answer);
+            }
+            Some(msg)
+        })
+    }
+
+    #[test]
+    fn wait_script_sends_the_request_and_prints_the_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        write_hook_files(dir.path()).unwrap();
+        let script = dir.path().join("bin").join(WAIT_SCRIPT);
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(std::fs::metadata(&script).unwrap().permissions().mode() & 0o111, 0o111, "eseguibile");
+        let sock = dir.path().join("s.sock");
+        let (_server, rx) = IpcServer::start(sock.clone(), TOKEN.into()).unwrap();
+        let responder = answer_next_message(rx, Some("ok #212 https://github.com/acme/acme_app/issues/212"));
+        let env = notify_env(&sock);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let out = run_args(
+            &script,
+            &["--on", "me", "--title", "Vault \"staging\" password", "--detail", "riga 1\nriga 2"],
+            &env,
+            "",
+        );
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "waiting registered: #212 https://github.com/acme/acme_app/issues/212\n"
+        );
+        let msg = responder.join().unwrap().expect("attesa");
+        assert_eq!((msg.channel, msg.node_key.as_str()), (Channel::Wait, "node-3"));
+        assert_eq!(
+            msg.payload,
+            serde_json::json!({"title": "Vault \"staging\" password", "on": "me", "detail": "riga 1\nriga 2"})
+        );
+    }
+
+    #[test]
+    fn wait_script_fails_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        write_hook_files(dir.path()).unwrap();
+        let script = dir.path().join("bin").join(WAIT_SCRIPT);
+        let out = run_args(&script, &["--on", "me", "--title", "x"], &[], "");
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("superzed not reachable"));
+
+        let sock = dir.path().join("s.sock");
+        let (_server, rx) = IpcServer::start(sock.clone(), TOKEN.into()).unwrap();
+        let env = notify_env(&sock);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        let responder = answer_next_message(rx.clone(), Some("error: no GitHub remote: origin is not configured"));
+        let out = run_args(&script, &["--on", "me", "--title", "x"], &env, "");
+        responder.join().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "superzed-wait: no GitHub remote: origin is not configured\n"
+        );
+
+        // nc diversi escono 0 o no senza risposta: lo script deve fallire in entrambi i casi
+        let responder = answer_next_message(rx, None);
+        let mut slow_env = env.clone();
+        slow_env.push(("SUPERZED_WAIT_TIMEOUT", "1"));
+        let out = run_args(&script, &["--on", "me", "--title", "x"], &slow_env, "");
+        responder.join().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "superzed-wait: no answer from superzed, the wait is NOT registered\n"
+        );
+
+        for args in [&["--on", "me"][..], &["--title", "x"][..], &[][..]] {
+            let out = run_args(&script, args, &env, "");
+            assert_eq!(out.status.code(), Some(1), "{args:?}");
+            assert!(String::from_utf8_lossy(&out.stderr).contains("usage: superzed-wait"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn session_start_announces_the_wait_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        write_hook_files(dir.path()).unwrap();
+        let settings = settings_json(dir.path());
+        let start = settings["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+        assert_eq!(start.len(), 2);
+        assert!(start[1]["command"].as_str().unwrap().contains("wait-context.sh"));
+        assert_eq!(settings["hooks"]["Stop"][0]["hooks"].as_array().unwrap().len(), 1);
+        let script = dir.path().join("wait-context.sh");
+        let out = run_args(&script, &[], &[("SUPERZED_NODE", "node-3")], "{}");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{WAIT_RULE}\n"));
+        let out = run_args(&script, &[], &[], "{}");
+        assert!(out.status.success() && out.stdout.is_empty(), "fuori da un nodo non stampa niente");
+        assert!(WAIT_RULE.contains("superzed-wait --on me --title") && WAIT_RULE.contains("gh issue close"));
     }
 }
