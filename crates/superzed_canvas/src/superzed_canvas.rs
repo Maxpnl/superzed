@@ -24,6 +24,7 @@ pub(crate) mod test_support;
 pub mod terminal_node;
 pub mod text_prompt;
 pub mod viewport;
+pub mod worktrees;
 
 pub use canvas_view::{CanvasView, ClaudePtyOverride, DefaultContainers, NodeSessionInit, SessionCard, golden_color, node_color};
 pub use commit_close::{UncommittedFile, uncommitted_files};
