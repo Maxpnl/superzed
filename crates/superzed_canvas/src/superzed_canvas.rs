@@ -38,6 +38,8 @@ use workspace::Workspace;
 pub fn init(cx: &mut App) {
     // le notifiche del canale `notify`: la chiave del nodo dice canvas e progetto
     cx.set_global(superzed_sessions::store::NotifyRouter(crate::registry::route_notify));
+    // le attese del canale `wait`: le apre il canvas della chat
+    cx.set_global(superzed_sessions::store::WaitRouter(crate::registry::route_wait));
     cx.set_global(workspace::superzed_tabs::RenameTabHook(rename_project_tab));
     cx.set_global(workspace::superzed_tabs::CloseProjectTabHook(close_project_tab));
     cx.set_global(workspace::superzed_layout::CanvasHasNodes(|view, cx| {

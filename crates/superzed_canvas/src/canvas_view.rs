@@ -36,6 +36,8 @@ mod navigation;
 mod scroll_route;
 mod shortcut_hints;
 pub use scroll_route::PAN_LATCH_MS;
+mod status;
+pub use status::{ChatRow, ChatState, STATUS_REFRESH, WAITING_SOURCE, WaitingState, chat_state};
 
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const TERMINAL_SIZE: (f32, f32) = (640., 400.);
@@ -235,6 +237,8 @@ pub struct CanvasView {
     pub(crate) automations: HashMap<NodeId, AutomationRuntime>,
     /// Pipeline Fatto → GitHub delle chat del kanban (sottoprogetto 4).
     pub(crate) done_pipeline: done::DonePipeline,
+    /// Attese, worktree e giro di lettura del nodo Stato.
+    status: status::StatusState,
     /// Come `dock_next_claude`: la prossima chat claude nuova nasce con questa
     /// definizione (`create_automation`).
     next_claude_automation: Option<crate::automation::AutomationDef>,
@@ -334,6 +338,7 @@ impl CanvasView {
             containers: HashMap::default(),
             automations: HashMap::default(),
             done_pipeline: Default::default(),
+            status: Default::default(),
             next_claude_automation: None,
             next_claude_origin: None,
             project_sources: Vec::new(),

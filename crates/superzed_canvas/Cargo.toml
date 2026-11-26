@@ -39,6 +39,8 @@ superzed_sources.workspace = true
 superzed_accounts.workspace = true
 # pipeline Fatto → GitHub (sottoprogetto 4)
 superzed_done.workspace = true
+# risposta alle attese del canale `wait`
+superzed_ipc.workspace = true
 chrono.workspace = true
 task.workspace = true
 terminal.workspace = true
@@ -59,7 +61,6 @@ project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 superzed_accounts = { workspace = true, features = ["test-support"] }
 superzed_done = { workspace = true, features = ["test-support"] }
-superzed_ipc.workspace = true
 superzed_sources = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

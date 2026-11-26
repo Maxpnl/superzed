@@ -276,7 +276,7 @@ fn done_written(canvas: WeakEntity<CanvasView>, job: WriteJob, sent: &[Action], 
     notify_done(project_root, severity, title, summary, None, action, cx);
     canvas
         .update(cx, |c, cx| {
-            if let Some(node) = c.node_for_session_id(&session_id, cx) {
+            if let Some(node) = c.node_for_session(&session_id, cx) {
                 c.set_done_status(node, status, cx);
             }
             c.refresh_github_panels(cx);
@@ -437,7 +437,7 @@ impl CanvasView {
     fn send_report_prompt(&self, node: NodeId, root: &Path, session_id: &str, cx: &mut Context<Self>) -> Option<PendingEnter> {
         let path = superzed_done::report_path(root, session_id).ok()?;
         let terminal = self.terminals.get(&node).map(|(_, t)| t.clone())?;
-        let paste = crate::automation::bracketed_paste(&superzed_done::chat_prompt(&path, session_id, &[]));
+        let paste = crate::automation::bracketed_paste(&superzed_done::chat_prompt(&path, session_id, &self.session_waits(session_id)));
         terminal.update(cx, |t, _| t.input(paste.into_bytes()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
@@ -537,12 +537,13 @@ impl CanvasView {
             std::env::var("PATH").ok().as_deref(),
         );
         let (runner, sid) = (env.claude.clone(), session_id.clone());
+        let open_waits = self.session_waits(&session_id);
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     std::fs::create_dir_all(&cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
                     let tail = superzed_done::transcript_tail(&transcript, superzed_done::TRANSCRIPT_TAIL)?;
-                    let stdin = superzed_done::headless_stdin(&sid, &[], &tail);
+                    let stdin = superzed_done::headless_stdin(&sid, &open_waits, &tail);
                     superzed_done::headless_report(runner, argv, stdin, sid).await
                 })
                 .await;
@@ -596,15 +597,6 @@ impl CanvasView {
         let title = self.chat_title_of(Some(node), cx);
         self.set_done_status(node, report_failed_status(&error), cx);
         self.done_notify(Severity::Error, format!("Report failed: {title}"), error, None, None, cx);
-    }
-
-    pub(crate) fn node_for_session_id(&self, session_id: &str, cx: &App) -> Option<NodeId> {
-        let store = superzed_sessions::SessionStore::global(cx)?;
-        let store = store.read(cx);
-        self.sessions
-            .iter()
-            .find(|(_, s)| store.get(&s.key).and_then(|s| s.session_id.as_deref()) == Some(session_id))
-            .map(|(id, _)| *id)
     }
 
     /// Azione di una notifica interna («Rivedi» della pipeline).
@@ -663,7 +655,7 @@ impl CanvasView {
         };
         let mut preview = Preview::from_report(&source.report, &source.previous);
         preview.repo = Some(cfg.repo.clone());
-        let title = self.chat_title_of(self.node_for_session_id(session_id, cx), cx);
+        let title = self.chat_title_of(self.node_for_session(session_id, cx), cx);
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -715,7 +707,7 @@ impl CanvasView {
                 return;
             }
         };
-        if let Some(node) = self.node_for_session_id(&job.session_id, cx) {
+        if let Some(node) = self.node_for_session(&job.session_id, cx) {
             self.set_done_status(node, STATUS_WRITING, cx);
         }
         spawn_done_write(cx.entity().downgrade(), env.gh.clone(), job, actions, path, cx);

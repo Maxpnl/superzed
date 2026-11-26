@@ -279,18 +279,25 @@ pub async fn save_project_file(fs: &dyn Fs, root: &Path, file: &ProjectFile) -> 
     fs.atomic_write(path, text).await
 }
 
-const PROJECT_GITIGNORE: &str = "/project.json\n/project.json.bak*\n";
+const WAITING_IGNORE: &str = "waiting.json";
+const PROJECT_GITIGNORE: &str = "/project.json\n/project.json.bak*\nwaiting.json\n";
 
 /// Claude Code allega a ogni risultato di Bash il diff dei file non ignorati da git che
 /// sono cambiati nel frattempo: senza questo, ogni pan, zoom o spostamento di un nodo
-/// mentre una chat lavora le arriva come una modifica di project.json. `prompts/` resta
-/// fuori, si puo' committare. Un `.gitignore` gia' presente non si tocca.
+/// mentre una chat lavora le arriva come una modifica di project.json (e ogni giro del
+/// nodo Stato come una di waiting.json). `prompts/` resta fuori, si puo' committare. Un
+/// `.gitignore` gia' presente si tiene: riceve solo la riga di waiting.json, se manca.
 async fn ensure_ignored(fs: &dyn Fs, dir: &Path) -> anyhow::Result<()> {
     let path = dir.join(".gitignore");
-    if fs.is_file(&path).await {
+    if !fs.is_file(&path).await {
+        return fs.atomic_write(path, PROJECT_GITIGNORE.to_string()).await;
+    }
+    let text = fs.load(&path).await?;
+    if text.lines().map(str::trim).any(|line| line == WAITING_IGNORE || line.strip_prefix('/') == Some(WAITING_IGNORE)) {
         return Ok(());
     }
-    fs.atomic_write(path, PROJECT_GITIGNORE.to_string()).await
+    let separator = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    fs.atomic_write(path, format!("{text}{separator}{WAITING_IGNORE}\n")).await
 }
 
 #[cfg(test)]
@@ -464,14 +471,30 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn save_ignores_project_json_and_keeps_an_existing_gitignore(cx: &mut TestAppContext) {
+    async fn save_ignores_project_json_and_extends_an_existing_gitignore(cx: &mut TestAppContext) {
         let fs = FakeFs::new(cx.executor());
         save_project_file(fs.as_ref(), Path::new("/repo"), &sample()).await.unwrap();
         assert_eq!(fs.load(Path::new("/repo/.superzed/.gitignore")).await.unwrap(), PROJECT_GITIGNORE);
 
-        fs.insert_tree("/other", json!({ ".superzed": { ".gitignore": "mine\n" } })).await;
+        fs.insert_tree("/other", json!({ ".superzed": { ".gitignore": "mine" } })).await;
         save_project_file(fs.as_ref(), Path::new("/other"), &sample()).await.unwrap();
-        assert_eq!(fs.load(Path::new("/other/.superzed/.gitignore")).await.unwrap(), "mine\n");
+        assert_eq!(fs.load(Path::new("/other/.superzed/.gitignore")).await.unwrap(), "mine\nwaiting.json\n");
+    }
+
+    #[gpui::test]
+    async fn an_existing_gitignore_gains_the_waiting_file_once(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repo", json!({ ".superzed": { ".gitignore": "project.json\n" } })).await;
+        let dir = Path::new("/repo/.superzed");
+        ensure_ignored(fs.as_ref(), dir).await.unwrap();
+        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\nwaiting.json\n");
+        ensure_ignored(fs.as_ref(), dir).await.unwrap();
+        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\nwaiting.json\n");
+
+        assert!(PROJECT_GITIGNORE.lines().any(|line| line == "waiting.json"), "{PROJECT_GITIGNORE}");
+        fs.insert_tree("/new", json!({ ".superzed": {} })).await;
+        ensure_ignored(fs.as_ref(), Path::new("/new/.superzed")).await.unwrap();
+        assert_eq!(fs.load(Path::new("/new/.superzed/.gitignore")).await.unwrap(), PROJECT_GITIGNORE);
     }
 
     #[gpui::test]
