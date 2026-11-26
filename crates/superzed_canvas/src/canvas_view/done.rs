@@ -121,7 +121,6 @@ impl Drop for PendingEnter {
 struct DoneRun {
     session_id: String,
     root: PathBuf,
-    areas: Vec<String>,
     stage: DoneStage,
     /// Controlli fatti nella fase corrente.
     polls: u32,
@@ -371,8 +370,8 @@ impl CanvasView {
         self.stop_done(node, cx);
     }
 
-    /// Id di sessione, root del report e aree; ogni errore ferma la pipeline prima del prompt.
-    fn prepare_done(&self, node: NodeId, cx: &App) -> Result<(String, PathBuf, Vec<String>), String> {
+    /// Id di sessione e root del report; ogni errore ferma la pipeline prima del prompt.
+    fn prepare_done(&self, node: NodeId, cx: &App) -> Result<(String, PathBuf), String> {
         let env = DoneEnv::get(cx).ok_or_else(|| "pipeline not initialized".to_string())?;
         let session = self.session_of(node, cx).ok_or_else(|| "no claude session".to_string())?;
         let session_id = session
@@ -380,8 +379,8 @@ impl CanvasView {
             .filter(|id| superzed_done::safe_session_id(id))
             .ok_or_else(|| "the session has no id yet".to_string())?;
         let root = env.root(self.project_root_path(cx)).ok_or_else(|| "the project has no folder".to_string())?;
-        let (_, areas) = superzed_done::load_pm(&root)?;
-        Ok((session_id, root, areas))
+        superzed_done::config_for(&root)?;
+        Ok((session_id, root))
     }
 
     /// Chiede il report per la chat (come uno spostamento a mano in Fatto).
@@ -398,7 +397,7 @@ impl CanvasView {
         if self.done_pipeline.runs.contains_key(&node) {
             return;
         }
-        let (session_id, root, areas) = match self.prepare_done(node, cx) {
+        let (session_id, root) = match self.prepare_done(node, cx) {
             Ok(x) => x,
             Err(e) => {
                 self.set_done_status(node, format!("GitHub: {e}"), cx);
@@ -407,7 +406,7 @@ impl CanvasView {
         };
         // rientro in Fatto: il report (e l'esito) di prima restano validi
         if let Ok(source) = superzed_done::review_source(&root, &session_id) {
-            if superzed_done::fully_written(&source.report, &areas, &source.previous) {
+            if superzed_done::fully_written(&source.report, &source.previous) {
                 self.set_done_status(node, STATUS_ALREADY_WRITTEN, cx);
             } else {
                 self.raise_review(node, &source.report, cx);
@@ -420,25 +419,25 @@ impl CanvasView {
         }
         let readiness = self.chat_readiness(node, cx);
         if automatic || (readiness == Readiness::Unavailable && !self.chat_starting(node, cx)) {
-            self.start_headless(node, session_id, root, areas, cx);
+            self.start_headless(node, session_id, root, cx);
             return;
         }
         let prompted = readiness == Readiness::Ready;
-        let enter = if prompted { self.send_report_prompt(node, &root, &session_id, &areas, cx) } else { None };
+        let enter = if prompted { self.send_report_prompt(node, &root, &session_id, cx) } else { None };
         let stage = if prompted { DoneStage::Prompted } else { DoneStage::WaitingChat };
         let task = self.spawn_done_poll(node, cx);
         self.done_pipeline
             .runs
-            .insert(node, DoneRun { session_id, root, areas, stage, polls: 0, idle_polls: 0, _enter: enter, _task: task });
+            .insert(node, DoneRun { session_id, root, stage, polls: 0, idle_polls: 0, _enter: enter, _task: task });
         self.set_done_status(node, if prompted { STATUS_PROMPTED } else { STATUS_WAITING }, cx);
     }
 
     /// Prompt incollato nella chat; l'Invio parte dopo `ENTER_DELAY` se la pipeline c'e'
     /// ancora, se no Ctrl-U cancella il testo incollato.
-    fn send_report_prompt(&self, node: NodeId, root: &Path, session_id: &str, areas: &[String], cx: &mut Context<Self>) -> Option<PendingEnter> {
+    fn send_report_prompt(&self, node: NodeId, root: &Path, session_id: &str, cx: &mut Context<Self>) -> Option<PendingEnter> {
         let path = superzed_done::report_path(root, session_id).ok()?;
         let terminal = self.terminals.get(&node).map(|(_, t)| t.clone())?;
-        let paste = crate::automation::bracketed_paste(&superzed_done::chat_prompt(&path, session_id, areas));
+        let paste = crate::automation::bracketed_paste(&superzed_done::chat_prompt(&path, session_id, &[]));
         terminal.update(cx, |t, _| t.input(paste.into_bytes()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
@@ -476,11 +475,11 @@ impl CanvasView {
         };
         run.polls += 1;
         let timed_out = run.polls >= wait_polls();
-        let (stage, root, session_id, areas) = (run.stage, run.root.clone(), run.session_id.clone(), run.areas.clone());
+        let (stage, root, session_id) = (run.stage, run.root.clone(), run.session_id.clone());
         match stage {
             DoneStage::WaitingChat => {
                 if readiness == Readiness::Ready {
-                    let enter = self.send_report_prompt(node, &root, &session_id, &areas, cx);
+                    let enter = self.send_report_prompt(node, &root, &session_id, cx);
                     if let Some(run) = self.done_pipeline.runs.get_mut(&node) {
                         run.stage = DoneStage::Prompted;
                         run.polls = 0;
@@ -492,7 +491,7 @@ impl CanvasView {
                 if (readiness == Readiness::Busy || starting) && !timed_out {
                     return true;
                 }
-                self.start_headless(node, session_id, root, areas, cx);
+                self.start_headless(node, session_id, root, cx);
                 false
             }
             DoneStage::Prompted => match superzed_done::read_report(&root, &session_id) {
@@ -509,7 +508,7 @@ impl CanvasView {
                     if !timed_out && !gave_up && readiness != Readiness::Unavailable {
                         return true;
                     }
-                    self.start_headless(node, session_id, root, areas, cx);
+                    self.start_headless(node, session_id, root, cx);
                     false
                 }
             },
@@ -519,7 +518,7 @@ impl CanvasView {
 
     /// `claude -p` sul transcript, sull'account dello scheduler, in background, da una
     /// cartella temporanea.
-    fn start_headless(&mut self, node: NodeId, session_id: String, root: PathBuf, areas: Vec<String>, cx: &mut Context<Self>) {
+    fn start_headless(&mut self, node: NodeId, session_id: String, root: PathBuf, cx: &mut Context<Self>) {
         let Some(env) = DoneEnv::get(cx) else {
             return;
         };
@@ -537,13 +536,13 @@ impl CanvasView {
             std::env::vars().map(|(k, _)| k),
             std::env::var("PATH").ok().as_deref(),
         );
-        let (runner, sid, prompt_areas) = (env.claude.clone(), session_id.clone(), areas.clone());
+        let (runner, sid) = (env.claude.clone(), session_id.clone());
         let task = cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     std::fs::create_dir_all(&cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
                     let tail = superzed_done::transcript_tail(&transcript, superzed_done::TRANSCRIPT_TAIL)?;
-                    let stdin = superzed_done::headless_stdin(&sid, &prompt_areas, &tail);
+                    let stdin = superzed_done::headless_stdin(&sid, &[], &tail);
                     superzed_done::headless_report(runner, argv, stdin, sid).await
                 })
                 .await;
@@ -558,7 +557,7 @@ impl CanvasView {
         });
         self.done_pipeline.runs.insert(
             node,
-            DoneRun { session_id, root, areas, stage: DoneStage::Headless, polls: 0, idle_polls: 0, _enter: None, _task: task },
+            DoneRun { session_id, root, stage: DoneStage::Headless, polls: 0, idle_polls: 0, _enter: None, _task: task },
         );
         self.set_done_status(node, STATUS_HEADLESS, cx);
     }
@@ -648,7 +647,7 @@ impl CanvasView {
             self.warn("Already writing to GitHub for this chat".into(), cx);
             return;
         }
-        let (cfg, areas) = match superzed_done::load_pm(&root) {
+        let cfg = match superzed_done::config_for(&root) {
             Ok(x) => x,
             Err(e) => {
                 self.warn(format!("GitHub: {e}"), cx);
@@ -662,7 +661,7 @@ impl CanvasView {
                 return;
             }
         };
-        let mut preview = Preview::from_report(&source.report, &areas, &source.previous);
+        let mut preview = Preview::from_report(&source.report, &source.previous);
         preview.repo = Some(cfg.repo.clone());
         let title = self.chat_title_of(self.node_for_session_id(session_id, cx), cx);
         let Some(workspace) = self.workspace.upgrade() else {
@@ -746,7 +745,7 @@ pub(crate) mod tests {
     use crate::test_support::workspace_with_repo;
     use gpui::{TestAppContext, VisualTestContext};
     use serde_json::json;
-    use superzed_done::test_support::{REPORT_JSON, SID, claude_output, write_pm, write_runner};
+    use superzed_done::test_support::{REPORT_JSON, SID, claude_output, write_git_origin, write_runner};
     use superzed_notifications::{Notification, NotificationFilter};
     use superzed_sessions::Phase;
     use superzed_sources::test_support::{FakeRunner, fail, ok};
@@ -808,12 +807,12 @@ pub(crate) mod tests {
     }
 
     /// Chat claude agganciata al kanban (in Implementazione) col PTY di cattura, config
-    /// claude-pm e transcript in `dir` (la root della pipeline), senza focus; `started`:
+    /// origin di git e transcript in `dir` (la root della pipeline), senza focus; `started`:
     /// claude ha mandato `SessionStart` (Idle, transcript noto).
     pub(crate) async fn done_chat(cx: &mut TestAppContext, started: bool) -> (Chat, &'static mut VisualTestContext) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        write_pm(dir.path());
+        write_git_origin(dir.path());
         std::fs::write(dir.path().join("transcript.jsonl"), TRANSCRIPT).unwrap();
         let (workspace, canvas, _fs, cx) = workspace_with_repo(cx, json!({})).await;
         let (gh, claude) = (write_runner(), FakeRunner::new());
@@ -1058,12 +1057,12 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    async fn without_claude_pm_config_nothing_happens(cx: &mut TestAppContext) {
+    async fn without_a_github_origin_nothing_happens(cx: &mut TestAppContext) {
         let (chat, cx) = done_chat(cx, true).await;
-        std::fs::remove_file(chat.dir.path().join(superzed_sources::github::PM_CONFIG)).unwrap();
+        std::fs::remove_dir_all(chat.dir.path().join(".git")).unwrap();
         to_done(&chat, cx);
         let s = status(&chat, cx).unwrap();
-        assert!(s.starts_with("GitHub: claude-pm configuration missing: "), "{s}");
+        assert!(s.starts_with("GitHub: no GitHub remote: not a git repository"), "{s}");
         assert_eq!(chat.canvas.read_with(cx, |c, _| c.done_stage(chat.node)), None);
         assert!(!pty_after_a_while(&pty(&chat), cx).contains("superzed:"));
         tick(wait_polls(), cx);
@@ -1276,8 +1275,8 @@ pub(crate) mod tests {
         let gh = &chat.gh;
         assert!(gh.calls()[0].line().starts_with("gh auth status"));
         for (needle, n) in [
-            ("gh project view 3 --owner acme", 1),
-            ("gh project field-list 3 --owner acme", 1),
+            ("gh project view 0 --owner acme", 1),
+            ("gh project field-list 0 --owner acme", 1),
             ("gh issue list --repo acme/acme_app --state all --search=", 1),
             ("gh issue create", 3),
             ("gh project item-add", 4),
@@ -1429,8 +1428,8 @@ pub(crate) mod tests {
         let gated = Arc::new(Gated { inner: chat.gh.clone(), needle: "gh issue close", gate: gate.shared() });
         let root = chat.dir.path().to_path_buf();
         let report = superzed_done::read_report(&root, SID).unwrap();
-        let (cfg, areas) = superzed_done::load_pm(&root).unwrap();
-        let preview = Preview::from_report(&report, &areas, &RunResult::default());
+        let cfg = superzed_done::config_for(&root).unwrap();
+        let preview = Preview::from_report(&report, &RunResult::default());
         let job = WriteJob {
             session_id: SID.into(),
             chat_title: "Import utenti".into(),
@@ -1455,7 +1454,7 @@ pub(crate) mod tests {
         assert!(["new:0", "new:1", "new:2"].iter().all(|k| mid.is_written(k)), "salvate prima della fine: {mid:?}");
         assert!(!mid.is_written("touched:12") && mid.snapshot(SID) == Some(report.clone()));
         // interrotta qui (app chiusa): la riprova rifa' solo il resto, mai i commenti gia' fatti
-        let retry = Preview::from_report(&report, &areas, &mid);
+        let retry = Preview::from_report(&report, &mid);
         assert_eq!(superzed_done::actions(&retry).iter().map(superzed_done::Action::key).collect::<Vec<_>>(), ["touched:12", "touched:8", "summary"]);
         open.send(()).unwrap();
         cx.run_until_parked();

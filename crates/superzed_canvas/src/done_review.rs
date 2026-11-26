@@ -1,6 +1,6 @@
 //! Anteprima "Update GitHub": le modifiche proposte dal report di una chat in Fatto,
 //! ognuna con la sua spunta; titolo e corpo delle issue nuove e commento delle issue
-//! toccate modificabili, Area e Status a scelta. Scrive solo il pulsante «Scrivi su
+//! toccate modificabili, Status a scelta. Scrive solo il pulsante «Scrivi su
 //! GitHub»: il modale non gestisce `menu::Confirm` (Invio nei campi non fa nulla, nel corpo
 //! va a capo) ed Esc chiude. Aprirlo di nuovo per la stessa sessione (un altro «Rivedi») lo
 //! lascia aperto.
@@ -229,19 +229,6 @@ impl DoneReviewModal {
         }
     }
 
-    /// Area di una issue nuova: la successiva fra quelle della config, poi nessuna.
-    pub fn cycle_area(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let areas = self.preview.areas.clone();
-        if let Some(n) = self.preview.new_issues.get_mut(ix).filter(|n| !n.written) {
-            n.area = match &n.area {
-                None => areas.first().cloned(),
-                Some(a) => areas.iter().position(|x| x == a).and_then(|i| areas.get(i + 1)).cloned(),
-            };
-            self.clear_error();
-            cx.notify();
-        }
-    }
-
     /// «Scrivi su GitHub»: valida, chiude e consegna l'anteprima. L'unico punto che scrive.
     pub fn write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let preview = self.collect(cx);
@@ -329,7 +316,7 @@ impl Render for DoneReviewModal {
                 .child(Label::new("Already written").color(Color::Success))
                 .into_any_element()
         };
-        // Area e Status si cambiano con un clic (giro fra le scelte)
+        // Lo Status si cambia con un clic (giro fra le scelte)
         let choice = |id: String, text: String| {
             Button::new(SharedString::from(id), text).style(ButtonStyle::Outlined).size(ButtonSize::Medium)
         };
@@ -394,7 +381,6 @@ impl Render for DoneReviewModal {
             .collect();
         let verify_numbers = self.preview.touched.iter().any(|t| !t.written);
 
-        let has_areas = !self.preview.areas.is_empty();
         let new_issues: Vec<AnyElement> = self
             .preview
             .new_issues
@@ -408,7 +394,6 @@ impl Render for DoneReviewModal {
                         .on_click(cx.listener(move |m, _: &ToggleState, _, cx| m.toggle_new(ix, cx)))
                         .into_any_element()
                 };
-                let area = n.area.clone().unwrap_or_else(|| "none".into());
                 v_flex()
                     .debug_selector(move || format!("superzed-done-new-{ix}"))
                     .gap_1()
@@ -417,12 +402,6 @@ impl Render for DoneReviewModal {
                             .gap_2()
                             .child(check)
                             .child(Label::new(format!("{} · {}", n.kind.name(), n.kind.status().name())))
-                            .when(has_areas && !n.written, |d| {
-                                d.child(
-                                    choice(format!("superzed-done-area-{ix}"), format!("Area: {area}"))
-                                        .on_click(cx.listener(move |m, _, _, cx| m.cycle_area(ix, cx))),
-                                )
-                            })
                             .when_some(n.waiting_on.clone(), |d, w| {
                                 d.child(Label::new(format!("Waiting on: {w}")).color(Color::Muted))
                             }),
@@ -542,7 +521,7 @@ mod tests {
     type Sink = Rc<RefCell<Option<Preview>>>;
 
     fn preview(previous: &RunResult) -> Preview {
-        Preview::from_report(&parse_report(REPORT_JSON, SID).unwrap(), &["frontend".into(), "backend".into()], previous)
+        Preview::from_report(&parse_report(REPORT_JSON, SID).unwrap(), previous)
     }
 
     async fn open(cx: &mut TestAppContext, p: Preview) -> (Entity<Workspace>, Entity<DoneReviewModal>, Sink, &'static mut VisualTestContext) {
@@ -578,7 +557,6 @@ mod tests {
             m.toggle_new(1, cx);
             m.title_editor(0).unwrap().update(cx, |e, cx| e.set_text("Test su Safari", window, cx));
             m.cycle_status(1, cx); // In Progress → Blocked
-            m.cycle_area(0, cx); // frontend → backend
         });
         assert_eq!(modal.read_with(cx, |m, cx| m.pending(cx)), 5);
         modal.update_in(cx, |m, window, cx| m.write(window, cx));
@@ -587,7 +565,7 @@ mod tests {
         let a = superzed_done::actions(&p);
         assert_eq!(a.iter().map(Action::key).collect::<Vec<_>>(), ["new:0", "new:2", "touched:12", "touched:8", "summary"]);
         match &a[0] {
-            Action::Upsert(d) => assert_eq!((d.title.as_str(), d.area.as_deref()), ("Test su Safari", Some("backend"))),
+            Action::Upsert(d) => assert_eq!(d.title.as_str(), "Test su Safari"),
             other => panic!("{other:?}"),
         }
         match &a[3] {
@@ -663,7 +641,7 @@ mod tests {
     async fn touched_rows_guard_their_numbers_and_empty_comments(cx: &mut TestAppContext) {
         let mut report = parse_report(REPORT_JSON, SID).unwrap();
         report.issues_touched.push(superzed_done::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
-        let p = Preview::from_report(&report, &["frontend".into()], &RunResult::default());
+        let p = Preview::from_report(&report, &RunResult::default());
         let (_workspace, modal, got, cx) = open(cx, p).await;
         modal.update(cx, |m, cx| m.toggle_touched(2, cx));
         assert!(!modal.read_with(cx, |m, _| m.preview().touched[2].enabled), "senza nota: resta spento");
@@ -699,7 +677,7 @@ mod tests {
     async fn the_edited_comment_is_written(cx: &mut TestAppContext) {
         let mut report = parse_report(REPORT_JSON, SID).unwrap();
         report.issues_touched.push(superzed_done::TouchedIssue { number: 30, action: TouchAction::Comment, note: None });
-        let p = Preview::from_report(&report, &["frontend".into()], &RunResult::default());
+        let p = Preview::from_report(&report, &RunResult::default());
         let (_workspace, modal, got, cx) = open(cx, p).await;
         assert_eq!(modal.read_with(cx, |m, cx| m.closes(cx)), 1);
         modal.update_in(cx, |m, window, cx| {

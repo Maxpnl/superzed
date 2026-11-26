@@ -81,8 +81,8 @@ pub fn claude_argv(
     ("/usr/bin/env".to_string(), args)
 }
 
-pub fn headless_stdin(session_id: &str, areas: &[String], transcript: &str) -> String {
-    format!("{}\n{TRANSCRIPT_SEPARATOR}\n{transcript}", headless_prompt(session_id, areas))
+pub fn headless_stdin(session_id: &str, open_waits: &[(u64, String)], transcript: &str) -> String {
+    format!("{}\n{TRANSCRIPT_SEPARATOR}\n{transcript}", headless_prompt(session_id, open_waits))
 }
 
 fn first_line(s: &str) -> String {
@@ -194,13 +194,13 @@ mod tests {
         let r = FakeRunner::new();
         r.on("claude -p --output-format json", superzed_sources::test_support::ok(&claude_output(REPORT_JSON)));
         let argv = claude_argv(None, Path::new("/Users/u"), Path::new("/tmp"), std::iter::empty(), None);
-        let stdin = headless_stdin(SID, &["frontend".into()], "{\"t\":1}\n");
+        let stdin = headless_stdin(SID, &[], "{\"t\":1}\n");
         let report = futures::executor::block_on(headless_report(r.clone(), argv.clone(), stdin, SID.into())).unwrap();
         assert_eq!(report.blockers.len(), 1);
         let call = &r.calls()[0];
         assert_eq!(call.program, "/usr/bin/env");
         let sent = call.stdin.as_deref().unwrap();
-        assert!(sent.contains(&format!("\n{TRANSCRIPT_SEPARATOR}\n{{\"t\":1}}\n")) && sent.contains("una fra frontend"), "{sent}");
+        assert!(sent.contains(&format!("\n{TRANSCRIPT_SEPARATOR}\n{{\"t\":1}}\n")) && sent.contains("rispondi solo con un oggetto JSON"), "{sent}");
         let r = FakeRunner::new();
         r.on("claude -p", fail(127, "env: claude: No such file or directory"));
         let err = futures::executor::block_on(headless_report(r, argv.clone(), String::new(), SID.into())).unwrap_err();

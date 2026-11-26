@@ -58,7 +58,6 @@ pub struct TouchedIssue {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     pub session_id: String,
-    pub area: Option<String>,
     pub done: Vec<String>,
     pub blockers: Vec<Blocker>,
     pub missing: Vec<String>,
@@ -73,7 +72,6 @@ pub fn parse_report(text: &str, session_id: &str) -> Result<Report, String> {
     let obj = v.as_object().ok_or_else(|| "report: a JSON object is needed".to_string())?;
     Ok(Report {
         session_id: session_id.to_string(),
-        area: opt_text(obj.get("area"), "area")?,
         done: list(obj.get("done"), "done", text_item)?,
         blockers: list(obj.get("blockers"), "blockers", blocker_item)?,
         missing: list(obj.get("missing"), "missing", text_item)?,
@@ -142,7 +140,6 @@ fn touched_item(v: &Value, path: &str) -> Result<TouchedIssue, String> {
 pub fn report_json(r: &Report) -> String {
     let v = json!({
         "session_id": r.session_id,
-        "area": r.area,
         "done": r.done,
         "blockers": r.blockers.iter().map(|b| json!({"title": b.title, "waiting_on": b.waiting_on})).collect::<Vec<_>>(),
         "missing": r.missing,
@@ -261,33 +258,40 @@ pub fn write_report(root: &Path, r: &Report) -> Result<(), String> {
 
 fn schema_example(session_id: &str) -> String {
     format!(
-        r#"{{"session_id": "{session_id}", "area": "<area o null>", "done": ["…"], "blockers": [{{"title": "…", "waiting_on": "<chi o cosa si aspetta, o null>"}}], "missing": ["…"], "problems": ["…"], "issues_touched": [{{"number": 12, "action": "close|update|comment", "note": "…"}}]}}"#
+        r#"{{"session_id": "{session_id}", "done": ["…"], "blockers": [{{"title": "…", "waiting_on": "<chi o cosa si aspetta, o null>"}}], "missing": ["…"], "problems": ["…"], "issues_touched": [{{"number": 12, "action": "close|update|comment", "note": "…"}}]}}"#
     )
 }
 
-fn rules(areas: &[String]) -> String {
-    let area = if areas.is_empty() { "null".to_string() } else { format!("una fra {} (o null)", areas.join(", ")) };
+fn rules(open_waits: &[(u64, String)]) -> String {
+    let waits = if open_waits.is_empty() {
+        String::new()
+    } else {
+        let list = open_waits.iter().map(|(number, title)| format!("#{number} «{title}»")).collect::<Vec<_>>().join(", ");
+        format!(
+            "\nQueste issue sono attese aperte da questa sessione: {list}. Se un blocco che riporteresti è una di queste, non metterlo in \"blockers\": mettila in \"issues_touched\" con \"close\" se si è sciolta o \"comment\" se c'è qualcosa da aggiungere."
+        )
+    };
     format!(
-        "- done: cosa e' stato fatto in questa sessione\n- blockers: cosa blocca il lavoro e chi o cosa si aspetta\n- missing: cosa manca ancora per chiudere il lavoro\n- problems: problemi o domande aperte\n- issues_touched: issue GitHub del repo toccate (close = da chiudere, update = da aggiornare, comment = da commentare) con una nota\n- area: {area}\n- al massimo {MAX_ENTRIES} voci per lista e {MAX_ENTRY_CHARS} caratteri per voce, nessuna stringa vuota"
+        "- done: cosa e' stato fatto in questa sessione\n- blockers: cosa blocca il lavoro e chi o cosa si aspetta\n- missing: cosa manca ancora per chiudere il lavoro\n- problems: problemi o domande aperte\n- issues_touched: issue GitHub del repo toccate (close = da chiudere, update = da aggiornare, comment = da commentare) con una nota\n- al massimo {MAX_ENTRIES} voci per lista e {MAX_ENTRY_CHARS} caratteri per voce, nessuna stringa vuota\nIn \"blockers\" solo ciò che può sbloccare una persona; non le attese su CI, job o altre macchine.{waits}"
     )
 }
 
 /// Prompt fisso scritto nella chat quando entra in Fatto.
-pub fn chat_prompt(path: &Path, session_id: &str, areas: &[String]) -> String {
+pub fn chat_prompt(path: &Path, session_id: &str, open_waits: &[(u64, String)]) -> String {
     format!(
         "superzed: questa chat e' passata in Fatto. Scrivi il report della sessione nel file {} (sovrascrivilo se esiste) come JSON con questo schema:\n{}\n{}\nScrivi solo quel file: niente commit, niente altre modifiche, nessuna scrittura su GitHub.",
         path.display(),
         schema_example(session_id),
-        rules(areas)
+        rules(open_waits)
     )
 }
 
 /// Prompt di `claude -p`: il transcript segue su stdin dopo `TRANSCRIPT_SEPARATOR`.
-pub fn headless_prompt(session_id: &str, areas: &[String]) -> String {
+pub fn headless_prompt(session_id: &str, open_waits: &[(u64, String)]) -> String {
     format!(
         "Qui sotto, dopo la riga {TRANSCRIPT_SEPARATOR}, c'e' la parte finale del transcript JSONL di una sessione di Claude Code. Ricava il report della sessione e rispondi solo con un oggetto JSON con questo schema, senza altro testo:\n{}\n{}",
         schema_example(session_id),
-        rules(areas)
+        rules(open_waits)
     )
 }
 
@@ -296,7 +300,7 @@ mod tests {
     use super::*;
     use crate::test_support::SID;
 
-    const FULL: &str = r#"{"session_id": "altro", "area": "frontend", "extra": {"x": 1},
+    const FULL: &str = r#"{"session_id": "altro", "extra": {"x": 1},
       "done": ["Import utenti", "  Login  "],
       "blockers": [{"title": "Policy annullamento", "waiting_on": "design"}, {"title": "Staging", "waiting_on": ""}],
       "missing": ["Test su Firefox"], "problems": ["Crash su Safari"],
@@ -310,7 +314,6 @@ mod tests {
     fn a_full_report_is_parsed_and_extra_fields_ignored() {
         let r = parse_report(FULL, SID).unwrap();
         assert_eq!(r.session_id, SID, "l'id e' sempre quello della sessione");
-        assert_eq!(r.area.as_deref(), Some("frontend"));
         assert_eq!(r.done, ["Import utenti", "Login"]);
         assert_eq!(
             r.blockers,
@@ -332,7 +335,7 @@ mod tests {
     #[test]
     fn missing_or_null_lists_are_empty() {
         assert_eq!(parse_report("{}", SID).unwrap(), Report { session_id: SID.into(), ..Default::default() });
-        assert!(parse_report(r#"{"done": null, "area": null}"#, SID).unwrap().done.is_empty());
+        assert!(parse_report(r#"{"done": null}"#, SID).unwrap().done.is_empty());
     }
 
     #[test]
@@ -387,16 +390,27 @@ mod tests {
 
     #[test]
     fn prompts_carry_path_schema_and_rules() {
-        let areas = vec!["frontend".to_string(), "backend".to_string()];
         let path = Path::new("/p/.superzed/reports/x.json");
-        let chat = chat_prompt(path, SID, &areas);
+        let chat = chat_prompt(path, SID, &[]);
         assert!(chat.starts_with("superzed: questa chat e' passata in Fatto. Scrivi il report della sessione nel file /p/.superzed/reports/x.json"), "{chat}");
-        for needle in [SID, "\"issues_touched\"", "area: una fra frontend, backend (o null)", "al massimo 50 voci", "nessuna scrittura su GitHub"] {
+        for needle in [SID, "\"issues_touched\"", "al massimo 50 voci", "nessuna scrittura su GitHub"] {
             assert!(chat.contains(needle), "{needle}: {chat}");
         }
         let headless = headless_prompt(SID, &[]);
         assert!(headless.contains(TRANSCRIPT_SEPARATOR) && headless.contains("rispondi solo con un oggetto JSON"));
-        assert!(headless.contains("- area: null"), "{headless}");
+        assert!(!headless.contains("area"), "{headless}");
+    }
+
+    #[test]
+    fn an_old_report_with_area_still_parses_and_the_prompt_lists_open_waits() {
+        let report = parse_report(r#"{"area":"frontend","done":["x"]}"#, "s-1").unwrap();
+        assert_eq!(report.done, ["x"]);
+        assert!(!report_json(&report).contains("\"area\""));
+        let prompt = headless_prompt("s-1", &[(12, "Vault password".into())]);
+        assert!(prompt.contains("#12 «Vault password»"), "{prompt}");
+        assert!(!prompt.contains("\"area\"") && !prompt.contains("aree"), "{prompt}");
+        assert!(prompt.contains("non le attese su CI, job o altre macchine"), "{prompt}");
+        assert!(!headless_prompt("s-1", &[]).contains("attese aperte"));
     }
 
     #[test]
