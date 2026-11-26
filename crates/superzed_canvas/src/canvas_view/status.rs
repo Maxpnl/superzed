@@ -75,7 +75,9 @@ pub(crate) struct StatusState {
     user: Option<String>,
     /// Attese aperte da questo canvas, per id di sessione: valgono anche prima che la
     /// lista letta da GitHub le contenga.
-    opened: HashMap<String, Vec<(u64, String)>>,
+    opened: HashMap<String, Vec<OpenedWait>>,
+    /// Numero dell'ultimo giro partito.
+    refresh_sequence: u64,
     /// Voci chiuse ma non ancora confermate da `gh`: un giro partito prima della chiusura
     /// non le rimette nella lista.
     closing: HashSet<u64>,
@@ -91,11 +93,20 @@ impl Default for StatusState {
             refreshing: false,
             user: None,
             opened: HashMap::default(),
+            refresh_sequence: 0,
             closing: HashSet::default(),
             refresh: Task::ready(()),
             timer: None,
         }
     }
+}
+
+struct OpenedWait {
+    number: u64,
+    title: String,
+    /// `refresh_sequence` all'apertura: solo un giro partito dopo puo' dire che la issue
+    /// non e' piu' aperta (uno partito prima l'ha letta quando forse non c'era ancora).
+    after_refresh: u64,
 }
 
 struct PreparedWait {
@@ -214,15 +225,24 @@ impl CanvasView {
         let runner = env.gh.clone();
         let user = self.status.user.clone();
         self.status.refreshing = true;
+        self.status.refresh_sequence += 1;
+        let sequence = self.status.refresh_sequence;
         cx.notify();
         self.status.refresh = cx.spawn(async move |this, cx| {
             let read = cx.background_spawn(read_status(runner, root, config, user)).await;
-            this.update(cx, |canvas, cx| canvas.status_read(read, cx)).ok();
+            this.update(cx, |canvas, cx| canvas.status_read(read, sequence, cx)).ok();
         });
     }
 
-    fn status_read(&mut self, read: StatusRead, cx: &mut Context<Self>) {
+    fn status_read(&mut self, read: StatusRead, sequence: u64, cx: &mut Context<Self>) {
         let StatusRead { mut waiting, user, worktrees } = read;
+        // chiusa su GitHub (o altrove): la lista fresca non la contiene piu'
+        if let WaitingState::Fresh { items, .. } = &waiting {
+            for waits in self.status.opened.values_mut() {
+                waits.retain(|wait| wait.after_refresh >= sequence || items.iter().any(|item| item.number == wait.number));
+            }
+            self.status.opened.retain(|_, waits| !waits.is_empty());
+        }
         if let Some(items) = waiting.items_mut() {
             items.retain(|item| !self.status.closing.contains(&item.number));
         }
@@ -279,9 +299,17 @@ impl CanvasView {
             let result = cx.background_spawn(async move { superzed_done::close_waiting(&runner, &config, number).await }).await;
             this.update(cx, |canvas, cx| {
                 canvas.status.closing.remove(&number);
-                if let Err(error) = result {
-                    canvas.status_notify(Severity::Error, format!("Waiting item #{number} not closed"), error, cx);
-                    canvas.refresh_status(cx);
+                match result {
+                    Ok(()) => {
+                        for waits in canvas.status.opened.values_mut() {
+                            waits.retain(|wait| wait.number != number);
+                        }
+                        canvas.status.opened.retain(|_, waits| !waits.is_empty());
+                    }
+                    Err(error) => {
+                        canvas.status_notify(Severity::Error, format!("Waiting item #{number} not closed"), error, cx);
+                        canvas.refresh_status(cx);
+                    }
                 }
             })
             .ok();
@@ -301,7 +329,12 @@ impl CanvasView {
     /// Attese aperte della sessione: quelle aperte da questo canvas e quelle della lista
     /// letta con quella sessione, una volta sola per numero.
     pub fn session_waits(&self, session_id: &str) -> Vec<(u64, String)> {
-        let mut waits: Vec<(u64, String)> = self.status.opened.get(session_id).cloned().unwrap_or_default();
+        let mut waits: Vec<(u64, String)> = self
+            .status
+            .opened
+            .get(session_id)
+            .map(|opened| opened.iter().map(|wait| (wait.number, wait.title.clone())).collect())
+            .unwrap_or_default();
         for item in self.status.waiting.items() {
             if item.session.as_deref() == Some(session_id) && !waits.iter().any(|(number, _)| *number == item.number) {
                 waits.push((item.number, item.title.clone()));
@@ -360,9 +393,10 @@ impl CanvasView {
         request: superzed_done::WaitRequest,
         cx: &mut Context<Self>,
     ) {
+        let after_refresh = self.status.refresh_sequence;
         let waits = self.status.opened.entry(session_id).or_default();
-        if !waits.iter().any(|(number, _)| *number == issue.number) {
-            waits.push((issue.number, request.title.clone()));
+        if !waits.iter().any(|wait| wait.number == issue.number) {
+            waits.push(OpenedWait { number: issue.number, title: request.title.clone(), after_refresh });
         }
         if request.on == WaitOn::Me {
             self.status_notify(Severity::Warning, format!("Waiting on you: {}", request.title), issue.url, cx);
@@ -407,6 +441,8 @@ mod tests {
  {"number":171,"title":"SECSTORE on CAR","body":"Waiting on: Basis\n\nWebGUI returns 500","createdAt":"2026-11-09T10:00:00Z","url":"https://github.com/acme/acme_app/issues/171","assignees":[]},
  {"number":212,"title":"Vault password","body":"Waiting on: Alice (owner)\n\nx\n\n<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[{"login":"alice"}]},
  {"number":208,"title":"Go-ahead to merge","body":"no first line\n<!-- superzed:session=s-2:item=3 -->","createdAt":"2026-11-21T10:00:00Z","url":"https://github.com/acme/acme_app/issues/208","assignees":[{"login":"alice"},{"login":"bob"}]}]"#;
+
+    const OPEN_212: &str = r#"[{"number":212,"title":"Vault password","body":"Waiting on: owner","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[]}]"#;
 
     const WORKTREE_LIST: &str = "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n";
 
@@ -570,7 +606,8 @@ mod tests {
     #[gpui::test]
     async fn a_wait_from_a_chat_opens_the_issue_answers_and_notifies_when_it_is_on_me(cx: &mut TestAppContext) {
         let (setup, cx) = setup(cx, true).await;
-        setup.gh.on("gh issue list", ok("[]"));
+        // la issue aperta compare nella lista (senza il marker: open_wait la crea lo stesso)
+        setup.gh.on("gh issue list", ok(OPEN_212));
         setup.gh.on("gh label create", ok(""));
         setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
         chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
@@ -609,6 +646,101 @@ mod tests {
         let (mine, line) = wait(&setup, "k-2", json!({"title": "x", "on": "me"}), cx);
         assert!(mine);
         assert_eq!(line, "error: the chat has no session yet, retry in a moment\n");
+        close_all(&setup.canvas, cx);
+    }
+
+    /// `gh` finto che si ferma sui comandi con `needle` finche' non si apre il cancello.
+    struct Gated {
+        inner: Arc<FakeRunner>,
+        needle: &'static str,
+        gate: futures::future::Shared<futures::channel::oneshot::Receiver<()>>,
+    }
+
+    impl Runner for Gated {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            stdin: Option<String>,
+        ) -> futures::future::BoxFuture<'static, Result<superzed_sources::RunOutput, superzed_sources::RunError>> {
+            let line = std::iter::once(program.to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+            let result = self.inner.run(program, args, stdin);
+            let gate = line.contains(self.needle).then(|| self.gate.clone());
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    gate.await.ok();
+                }
+                result.await
+            })
+        }
+    }
+
+    /// Chat "k-1" (sessione "s-1") con un'attesa #212 "Vault password" aperta dal canvas.
+    async fn with_open_wait(cx: &mut TestAppContext) -> (Setup, &'static mut VisualTestContext) {
+        let (setup, cx) = setup(cx, true).await;
+        setup.gh.on("gh issue list", ok(OPEN_212));
+        setup.gh.on("gh label create", ok(""));
+        setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
+        setup.gh.on("gh issue close", ok(""));
+        chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
+        let (_, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "Basis"}), cx);
+        assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        (setup, cx)
+    }
+
+    fn waits(setup: &Setup, cx: &mut VisualTestContext) -> Vec<(u64, String)> {
+        setup.canvas.read_with(cx, |c, _| c.session_waits("s-1"))
+    }
+
+    #[gpui::test]
+    async fn a_wait_closed_from_the_node_leaves_session_waits(cx: &mut TestAppContext) {
+        let (setup, cx) = with_open_wait(cx).await;
+        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())]);
+        setup.canvas.update(cx, |c, cx| c.close_waiting_item(212, cx));
+        cx.run_until_parked();
+        assert_eq!(setup.gh.count("gh issue close 212"), 1);
+        assert_eq!(waits(&setup, cx), vec![], "chiusa: niente piu' nel prompt del report");
+        close_all(&setup.canvas, cx);
+    }
+
+    #[gpui::test]
+    async fn a_wait_missing_from_a_later_fresh_read_leaves_session_waits(cx: &mut TestAppContext) {
+        let (setup, cx) = with_open_wait(cx).await;
+        refresh(&setup, cx);
+        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "ancora aperta su GitHub");
+        setup.gh.on("gh issue list", fail(1, "HTTP 502: bad gateway"));
+        refresh(&setup, cx);
+        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "una lettura fallita non dice niente");
+        // chiusa direttamente su GitHub
+        setup.gh.on("gh issue list", ok("[]"));
+        refresh(&setup, cx);
+        assert_eq!(waits(&setup, cx), vec![]);
+        close_all(&setup.canvas, cx);
+    }
+
+    #[gpui::test]
+    async fn a_refresh_started_before_the_wait_does_not_drop_it(cx: &mut TestAppContext) {
+        use futures::FutureExt as _;
+        let (setup, cx) = setup(cx, true).await;
+        // la lista letta dal giro gia' partito non contiene ancora la issue
+        setup.gh.on("gh issue list", ok("[]"));
+        setup.gh.on("gh label create", ok(""));
+        setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
+        chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
+        let (open, gate) = futures::channel::oneshot::channel::<()>();
+        let gated = Arc::new(Gated { inner: setup.gh.clone(), needle: "worktree list", gate: gate.shared() });
+        cx.update(|_, cx| superzed_done::init_test(cx, gated, FakeRunner::new(), Some(setup.dir.path().to_path_buf())));
+        setup.canvas.update(cx, |c, cx| c.refresh_status(cx));
+        cx.run_until_parked();
+        assert!(setup.canvas.read_with(cx, |c, _| c.status_refreshing()), "giro fermo sui worktree");
+        let (_, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "Basis"}), cx);
+        assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        open.send(()).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(waiting(&setup, cx), WaitingState::Fresh { ref items, .. } if items.is_empty()));
+        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "il giro partito prima non la toglie");
+        refresh(&setup, cx);
+        assert_eq!(waits(&setup, cx), vec![], "un giro partito dopo si'");
         close_all(&setup.canvas, cx);
     }
 
