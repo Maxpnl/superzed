@@ -62,7 +62,8 @@ pub fn waiting_header(state: &WaitingState, now: i64) -> String {
         WaitingState::NotLoaded => "WAITING".to_string(),
         WaitingState::Unavailable(reason) => format!("WAITING · not available: {reason}"),
         WaitingState::Fresh { items, .. } => format!("WAITING ({})", items.len()),
-        WaitingState::Stale { items, read_at, error } => {
+        WaitingState::Stale { read_at: None, error, .. } => format!("WAITING · not available: {error}"),
+        WaitingState::Stale { items, read_at: Some(read_at), error } => {
             format!("WAITING ({}) · offline copy, {} old · {error}", items.len(), short_age(seconds(now - read_at)))
         }
     }
@@ -378,7 +379,7 @@ mod tests {
     }
 
     fn three() -> Vec<WaitingItem> {
-        vec![item(212, true, Some("Alice (owner)")), item(208, true, None), item(171, false, Some("Basis"))]
+        vec![item(212, true, Some("Alice (owner)")), item(208, true, None), item(171, false, Some("Ops team"))]
     }
 
     /// Worktree principale (o secondario) su un ramo.
@@ -397,8 +398,8 @@ mod tests {
 
     fn merged_worktree() -> Worktree {
         Worktree {
-            path: PathBuf::from("/home/alice/acme_app/.worktrees/bills-at-source"),
-            head: Head::Branch("feat/bills-at-source".to_string()),
+            path: PathBuf::from("/home/alice/acme_app/.worktrees/search-filters"),
+            head: Head::Branch("feat/search-filters".to_string()),
             ..worktree(0, Some(0), Some(5), true, false)
         }
     }
@@ -412,13 +413,13 @@ mod tests {
     }
 
     fn row(state: ChatState, age: Option<Duration>) -> ChatRow {
-        ChatRow { node: NodeId(1), title: "cash journal".to_string(), state, age }
+        ChatRow { node: NodeId(1), title: "search filters".to_string(), state, age }
     }
 
     #[test]
     fn row_texts() {
         assert_eq!(waiting_who(&item(212, true, Some("Alice (owner)"))), "you");
-        assert_eq!(waiting_who(&item(171, false, Some("Basis"))), "Basis");
+        assert_eq!(waiting_who(&item(171, false, Some("Ops team"))), "Ops team");
         assert_eq!(waiting_who(&item(9, false, None)), "—");
         assert_eq!(worktree_summary(&worktree(0, Some(0), Some(0), false, false)), "clean");
         assert_eq!(worktree_summary(&worktree(4, Some(12), Some(3), false, false)), "+12 −3 · 4 dirty");
@@ -434,8 +435,13 @@ mod tests {
             "WAITING · not available: no GitHub remote: origin is not configured"
         );
         assert!(
-            waiting_header(&WaitingState::Stale { items: three(), read_at: 0, error: "HTTP 502".into() }, 600)
+            waiting_header(&WaitingState::Stale { items: three(), read_at: Some(0), error: "HTTP 502".into() }, 600)
                 .starts_with("WAITING (3) · offline copy, 10m old · HTTP 502")
+        );
+        assert_eq!(
+            waiting_header(&WaitingState::Stale { items: Vec::new(), read_at: None, error: "HTTP 502".into() }, 1_795_000_000),
+            "WAITING · not available: HTTP 502",
+            "senza copia locale: niente conteggio ne' eta'"
         );
     }
 
@@ -444,10 +450,10 @@ mod tests {
         let root = Path::new("/home/alice/acme_app");
         let home = Path::new("/home/alice");
         assert_eq!(worktree_name(root, Some(root), home), "acme_app");
-        assert_eq!(worktree_name(Path::new("/home/alice/acme_app/.worktrees/cash-journal"), Some(root), home), "cash-journal");
-        assert_eq!(worktree_name(Path::new("/home/alice/acme_app.worktrees/cash-journal"), Some(root), home), "cash-journal");
-        assert_eq!(worktree_name(Path::new("/home/alice/gpm"), Some(root), home), "~/gpm");
+        assert_eq!(worktree_name(Path::new("/home/alice/acme_app/.worktrees/import-fix"), Some(root), home), "import-fix");
+        assert_eq!(worktree_name(Path::new("/home/alice/acme_app.worktrees/import-fix"), Some(root), home), "import-fix");
+        assert_eq!(worktree_name(Path::new("/home/alice/release"), Some(root), home), "~/release");
         assert_eq!(worktree_name(Path::new("/srv/acme_app2"), Some(root), home), "/srv/acme_app2");
-        assert_eq!(worktree_name(Path::new("/home/alice/gpm"), None, home), "~/gpm");
+        assert_eq!(worktree_name(Path::new("/home/alice/release"), None, home), "~/release");
     }
 }

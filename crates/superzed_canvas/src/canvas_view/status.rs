@@ -23,8 +23,8 @@ pub enum WaitingState {
     /// Nessun remote GitHub (o nessuna cartella): il motivo.
     Unavailable(String),
     Fresh { items: Vec<WaitingItem>, read_at: i64 },
-    /// `gh` non risponde: la copia locale, con l'errore.
-    Stale { items: Vec<WaitingItem>, read_at: i64, error: String },
+    /// `gh` non risponde: la copia locale (`read_at` `None`: nessuna copia), con l'errore.
+    Stale { items: Vec<WaitingItem>, read_at: Option<i64>, error: String },
 }
 
 impl WaitingState {
@@ -72,6 +72,11 @@ pub(crate) struct StatusState {
     waiting: WaitingState,
     worktrees: Result<Vec<Worktree>, String>,
     refreshing: bool,
+    /// Un giro chiesto mentre un altro era in corso: parte quando quello finisce.
+    refresh_again: bool,
+    /// Titoli (normalizzati) delle attese che si stanno registrando: una seconda richiesta
+    /// uguale passerebbe il controllo dei doppioni prima che la prima abbia creato la issue.
+    waits_in_flight: HashSet<String>,
     /// Login di `gh`, letto al primo giro che ci riesce e poi tenuto.
     user: Option<String>,
     /// Attese aperte da questo canvas, per id di sessione: valgono anche prima che la
@@ -92,6 +97,8 @@ impl Default for StatusState {
             waiting: WaitingState::NotLoaded,
             worktrees: Ok(Vec::new()),
             refreshing: false,
+            refresh_again: false,
+            waits_in_flight: HashSet::default(),
             user: None,
             opened: HashMap::default(),
             refresh_sequence: 0,
@@ -143,7 +150,13 @@ async fn read_status(runner: Arc<dyn Runner>, root: PathBuf, config: Result<PmCo
     };
     let user = match user {
         Some(user) => Some(user),
-        None => superzed_done::gh_user(&runner).await.ok(),
+        None => match superzed_done::gh_user(&runner).await {
+            Ok(user) => Some(user),
+            Err(error) => {
+                log::debug!("superzed status: gh user not read, no waiting item is marked as yours: {error}");
+                None
+            }
+        },
     };
     let path = root.join(WAITING_FILE);
     let waiting = match superzed_done::read_waiting(&runner, &config.repo, user.as_deref()).await {
@@ -154,10 +167,10 @@ async fn read_status(runner: Arc<dyn Runner>, root: PathBuf, config: Result<PmCo
             }
             WaitingState::Fresh { items, read_at }
         }
-        Err(error) => {
-            let (items, read_at) = read_waiting_file(&path).unwrap_or_default();
-            WaitingState::Stale { items, read_at, error }
-        }
+        Err(error) => match read_waiting_file(&path) {
+            Some((items, read_at)) => WaitingState::Stale { items, read_at: Some(read_at), error },
+            None => WaitingState::Stale { items: Vec::new(), read_at: None, error },
+        },
     };
     StatusRead { waiting, user, worktrees }
 }
@@ -226,9 +239,12 @@ impl CanvasView {
         rows
     }
 
-    /// Un giro di lettura in background; non parte se ce n'e' gia' uno in corso.
+    /// Un giro di lettura in background; se ce n'e' gia' uno in corso ne parte un altro
+    /// quando finisce (uno solo), perche' quello in corso puo' aver letto prima di una
+    /// chiusura o di un'attesa nuova.
     pub fn refresh_status(&mut self, cx: &mut Context<Self>) {
         if self.status.refreshing {
+            self.status.refresh_again = true;
             return;
         }
         let Some(env) = DoneEnv::get(cx) else {
@@ -272,6 +288,29 @@ impl CanvasView {
         }
         self.status.waiting = waiting;
         self.status.worktrees = worktrees;
+        cx.notify();
+        if std::mem::take(&mut self.status.refresh_again) {
+            self.refresh_status(cx);
+        }
+    }
+
+    /// Una lettura delle attese fuori dai giri (la pipeline di Fatto senza un nodo Stato
+    /// aggiornato); `None` senza remote GitHub.
+    pub(super) fn read_waiting_once(&self, root: &Path, cx: &App) -> Option<Task<Result<Vec<WaitingItem>, String>>> {
+        let env = DoneEnv::get(cx)?;
+        let config = superzed_done::config_for(root).ok()?;
+        let runner = env.gh.clone();
+        let user = self.status.user.clone();
+        Some(cx.background_spawn(async move { superzed_done::read_waiting(&runner, &config.repo, user.as_deref()).await }))
+    }
+
+    pub(super) fn waiting_read_once(&mut self, mut items: Vec<WaitingItem>, cx: &mut Context<Self>) {
+        // un giro del nodo Stato finito nel frattempo e' altrettanto fresco e sa quali sono le mie
+        if matches!(self.status.waiting, WaitingState::Fresh { .. }) {
+            return;
+        }
+        items.retain(|item| !self.status.closing.contains(&item.number));
+        self.status.waiting = WaitingState::Fresh { items, read_at: chrono::Utc::now().timestamp() };
         cx.notify();
     }
 
@@ -398,19 +437,30 @@ impl CanvasView {
                 return true;
             }
         };
+        let title = superzed_done::normalized_title(&request.title);
+        if !self.status.waits_in_flight.insert(title.clone()) {
+            reply.send("error: the same wait is already being registered, retry in a moment");
+            return true;
+        }
         cx.spawn(async move |this, cx| {
-            let opened = cx.background_spawn({
-                let session_id = session_id.clone();
-                let request = request.clone();
-                async move { superzed_done::open_wait(&runner, &config, &session_id, &request).await }
-            });
-            match opened.await {
-                Ok(issue) => {
-                    reply.send(&format!("ok #{} {}", issue.number, issue.url));
-                    this.update(cx, |canvas, cx| canvas.wait_opened(session_id, issue, request, cx)).ok();
-                }
+            let opened = cx
+                .background_spawn({
+                    let session_id = session_id.clone();
+                    let request = request.clone();
+                    async move { superzed_done::open_wait(&runner, &config, &session_id, &request).await }
+                })
+                .await;
+            match &opened {
+                Ok(opened) => reply.send(&format!("ok #{} {}", opened.issue.number, opened.issue.url)),
                 Err(error) => reply.send(&format!("error: {error}")),
             }
+            this.update(cx, |canvas, cx| {
+                canvas.status.waits_in_flight.remove(&title);
+                if let Ok(opened) = opened {
+                    canvas.wait_opened(session_id, opened, request, cx);
+                }
+            })
+            .ok();
         })
         .detach();
         true
@@ -430,16 +480,18 @@ impl CanvasView {
     fn wait_opened(
         &mut self,
         session_id: String,
-        issue: superzed_done::FoundIssue,
+        opened: superzed_done::OpenedWait,
         request: superzed_done::WaitRequest,
         cx: &mut Context<Self>,
     ) {
+        let issue = opened.issue;
         let after_refresh = self.status.refresh_sequence;
         let waits = self.status.opened.entry(session_id).or_default();
         if !waits.iter().any(|wait| wait.number == issue.number) {
-            waits.push(OpenedWait { number: issue.number, title: request.title.clone(), after_refresh });
+            waits.push(OpenedWait { number: issue.number, title: opened.title, after_refresh });
         }
-        if request.on == WaitOn::Me {
+        // un'attesa gia' aperta (da un giro precedente di un'automazione) e' gia' stata notificata
+        if opened.created && request.on == WaitOn::Me {
             self.status_notify(Severity::Warning, format!("Waiting on you: {}", request.title), issue.url, cx);
         }
         self.refresh_status(cx);
@@ -479,11 +531,11 @@ pub(super) mod tests {
     use superzed_sources::test_support::{FakeRunner, fail, ok};
 
     const LIST: &str = r#"[
- {"number":171,"title":"SECSTORE on CAR","body":"Waiting on: Basis\n\nWebGUI returns 500","createdAt":"2026-11-09T10:00:00Z","url":"https://github.com/acme/acme_app/issues/171","assignees":[]},
- {"number":212,"title":"Vault password","body":"Waiting on: Alice (owner)\n\nx\n\n<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[{"login":"alice"}]},
- {"number":208,"title":"Go-ahead to merge","body":"no first line\n<!-- superzed:session=s-2:item=3 -->","createdAt":"2026-11-21T10:00:00Z","url":"https://github.com/acme/acme_app/issues/208","assignees":[{"login":"alice"},{"login":"bob"}]}]"#;
+ {"number":171,"title":"Firewall rule for the reporting database","body":"Waiting on: Ops team\n\nthe reporting job times out","createdAt":"2026-11-09T10:00:00Z","url":"https://github.com/acme/acme_app/issues/171","assignees":[]},
+ {"number":212,"title":"Staging API key for the mailer","body":"Waiting on: Alice (owner)\n\nx\n\n<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[{"login":"alice"}]},
+ {"number":208,"title":"Go-ahead to merge feat/search-filters","body":"no first line\n<!-- superzed:session=s-2:item=3 -->","createdAt":"2026-11-21T10:00:00Z","url":"https://github.com/acme/acme_app/issues/208","assignees":[{"login":"alice"},{"login":"bob"}]}]"#;
 
-    const OPEN_212: &str = r#"[{"number":212,"title":"Vault password","body":"Waiting on: owner","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[]}]"#;
+    const OPEN_212: &str = r#"[{"number":212,"title":"Staging API key for the mailer","body":"Waiting on: owner","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[]}]"#;
 
     const WORKTREE_LIST: &str = "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n";
 
@@ -588,20 +640,21 @@ pub(super) mod tests {
         };
         setup.gh.on("gh issue list", fail(1, "HTTP 502: bad gateway"));
         refresh(&setup, cx);
-        let WaitingState::Stale { items, error, .. } = waiting(&setup, cx) else {
+        let WaitingState::Stale { items, error, read_at } = waiting(&setup, cx) else {
             panic!("atteso Stale: {:?}", waiting(&setup, cx));
         };
         assert_eq!(items, fresh, "la copia locale");
+        assert!(read_at.is_some());
         assert!(error.contains("502"), "{error}");
 
         // senza nessun giro riuscito e senza file
         std::fs::remove_file(setup.dir.path().join(WAITING_FILE)).unwrap();
         setup.canvas.update(cx, |c, _| c.status = StatusState::default());
         refresh(&setup, cx);
-        let WaitingState::Stale { items, error, .. } = waiting(&setup, cx) else {
+        let WaitingState::Stale { items, error, read_at } = waiting(&setup, cx) else {
             panic!("atteso Stale: {:?}", waiting(&setup, cx));
         };
-        assert_eq!(items, vec![]);
+        assert_eq!((items, read_at), (vec![], None), "nessuna copia, non una copia del 1970");
         assert!(error.contains("502"), "{error}");
         assert!(notifications(cx).is_empty(), "{:?}", notifications(cx));
     }
@@ -614,7 +667,7 @@ pub(super) mod tests {
         assert_eq!(setup.gh.count("gh "), 0);
         assert_eq!(setup.canvas.read_with(cx, |c, _| c.status_worktrees().clone()).unwrap().len(), 1);
         chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
-        let (mine, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "me"}), cx);
+        let (mine, line) = wait(&setup, "k-1", json!({"title": "Staging API key for the mailer", "on": "me"}), cx);
         assert!(mine);
         assert_eq!(line, "error: no GitHub remote: origin is not configured\n");
         assert_eq!(setup.gh.count("gh "), 0);
@@ -639,37 +692,60 @@ pub(super) mod tests {
             c.refresh_status(cx);
             assert!(c.status_refreshing());
             c.refresh_status(cx);
+            c.refresh_status(cx);
         });
         cx.run_until_parked();
-        assert_eq!(reads(), 3, "il secondo non parte mentre il primo e' in corso");
+        assert_eq!(reads(), 4, "chiesti durante il primo: uno solo, dopo il primo");
+        assert!(!setup.canvas.read_with(cx, |c, _| c.status_refreshing()));
+    }
+
+    #[gpui::test]
+    async fn a_refresh_asked_during_another_runs_after_it_and_sees_the_new_state(cx: &mut TestAppContext) {
+        let (setup, cx) = setup(cx, true).await;
+        let open = gate(&setup, "gh issue list", cx);
+        setup.canvas.update(cx, |c, cx| c.refresh_status(cx));
+        cx.run_until_parked();
+        // il giro fermo ha gia' letto la lista con tre attese; due si chiudono su GitHub intanto
+        setup.gh.on("gh issue list", ok(OPEN_212));
+        setup.canvas.update(cx, |c, cx| c.refresh_status(cx));
+        open.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(numbers(waiting(&setup, cx).items()), [212], "il giro chiesto durante il primo parte dopo");
+        assert_eq!(setup.gh.count("gh issue list"), 2);
     }
 
     #[gpui::test]
     async fn a_wait_from_a_chat_opens_the_issue_answers_and_notifies_when_it_is_on_me(cx: &mut TestAppContext) {
         let (setup, cx) = setup(cx, true).await;
-        // la issue aperta compare nella lista (senza il marker: open_wait la crea lo stesso)
-        setup.gh.on("gh issue list", ok(OPEN_212));
+        setup.gh.on("gh issue list", ok("[]"));
         setup.gh.on("gh label create", ok(""));
         setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
         chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
         chat(&setup, "k-2", None, SessionTimes::default(), cx);
 
         let lists = setup.gh.count("gh issue list");
-        let (mine, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "me"}), cx);
+        // open_wait legge una lista senza la issue; il refresh dopo la creazione la trova
+        let open = gate(&setup, "gh issue create", cx);
+        let (reply, client) = reply_pair();
+        let mine = setup.canvas.update(cx, |c, cx| c.request_wait("k-1", json!({"title": "Staging API key for the mailer", "on": "me"}), reply, cx));
+        cx.run_until_parked();
+        setup.gh.on("gh issue list", ok(OPEN_212));
+        open.send(()).unwrap();
+        cx.run_until_parked();
         assert!(mine);
-        assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        assert_eq!(answer(client), "ok #212 https://github.com/acme/acme_app/issues/212\n");
         assert_eq!(setup.gh.count("gh issue create -R acme/acme_app"), 1);
         let list = notifications(cx);
         assert_eq!(list.len(), 1, "{list:?}");
-        assert_eq!(list[0].title, "Waiting on you: Vault password");
+        assert_eq!(list[0].title, "Waiting on you: Staging API key for the mailer");
         assert_eq!(list[0].source, WAITING_SOURCE);
         assert_eq!(list[0].severity, Severity::Warning);
-        assert_eq!(setup.canvas.read_with(cx, |c, _| c.session_waits("s-1")), vec![(212, "Vault password".to_string())]);
+        assert_eq!(setup.canvas.read_with(cx, |c, _| c.session_waits("s-1")), vec![(212, "Staging API key for the mailer".to_string())]);
         assert_eq!(setup.gh.count("gh issue list"), lists + 2, "la lista di open_wait e quella del refresh");
         assert!(matches!(waiting(&setup, cx), WaitingState::Fresh { .. }), "parte un refresh");
 
         setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/213\n"));
-        let (mine, line) = wait(&setup, "k-1", json!({"title": "SECSTORE on CAR", "on": "Basis"}), cx);
+        let (mine, line) = wait(&setup, "k-1", json!({"title": "Firewall rule for the reporting database", "on": "Ops team"}), cx);
         assert!(mine);
         assert_eq!(line, "ok #213 https://github.com/acme/acme_app/issues/213\n");
         assert_eq!(notifications(cx).len(), 1, "attesa su altri: nessuna notifica");
@@ -690,11 +766,64 @@ pub(super) mod tests {
         close_all(&setup.canvas, cx);
     }
 
-    /// `gh` finto che si ferma sui comandi con `needle` finche' non si apre il cancello.
+    /// Un'automazione parte ogni volta con una sessione nuova: la stessa attesa ancora
+    /// aperta su GitHub si riusa, senza una issue ne' una notifica in piu'.
+    #[gpui::test]
+    async fn a_wait_already_open_on_github_is_reused_without_a_notification(cx: &mut TestAppContext) {
+        let (setup, cx) = setup(cx, true).await;
+        setup.gh.on("gh issue list", ok(OPEN_212));
+        setup.gh.on("gh label create", ok(""));
+        setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/300\n"));
+        chat(&setup, "k-run-2", Some("s-run-2"), SessionTimes::default(), cx);
+        let (mine, line) = wait(&setup, "k-run-2", json!({"title": " staging API key for the MAILER ", "on": "me"}), cx);
+        assert!(mine);
+        assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        assert_eq!(setup.gh.count("gh issue create"), 0);
+        assert!(notifications(cx).is_empty(), "{:?}", notifications(cx));
+        assert_eq!(setup.canvas.read_with(cx, |c, _| c.session_waits("s-run-2")), vec![(212, "Staging API key for the mailer".to_string())]);
+        close_all(&setup.canvas, cx);
+    }
+
+    #[gpui::test]
+    async fn a_retry_while_the_wait_is_being_registered_creates_nothing(cx: &mut TestAppContext) {
+        let (setup, cx) = setup(cx, true).await;
+        setup.gh.on("gh issue list", ok("[]"));
+        setup.gh.on("gh label create", ok(""));
+        setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
+        chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
+        let open = gate(&setup, "gh issue create", cx);
+        let (reply, client) = reply_pair();
+        setup.canvas.update(cx, |c, cx| c.request_wait("k-1", json!({"title": "Staging API key for the mailer", "on": "me"}), reply, cx));
+        cx.run_until_parked();
+        let (mine, line) = wait(&setup, "k-1", json!({"title": "  staging api key for the mailer", "on": "me"}), cx);
+        assert!(mine);
+        assert_eq!(line, "error: the same wait is already being registered, retry in a moment\n");
+        setup.gh.on("gh issue list", ok(OPEN_212));
+        open.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(answer(client), "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        assert_eq!(setup.gh.count("gh issue create"), 1);
+
+        // finita la prima, la stessa attesa non e' piu' in corso: si riusa la issue aperta
+        let (_, line) = wait(&setup, "k-1", json!({"title": "Staging API key for the mailer", "on": "me"}), cx);
+        assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        assert_eq!(setup.gh.count("gh issue create"), 1);
+
+        // anche una registrazione fallita libera il titolo
+        setup.gh.on("gh issue list", fail(1, "HTTP 502: bad gateway"));
+        for _ in 0..2 {
+            let (_, line) = wait(&setup, "k-1", json!({"title": "Go-ahead to merge feat/import-fix", "on": "me"}), cx);
+            assert!(line.starts_with("error: ") && line.contains("502"), "{line}");
+        }
+        close_all(&setup.canvas, cx);
+    }
+
+    /// `gh` finto che ferma il primo comando con `needle` finche' non si apre il cancello;
+    /// la risposta e' quella del momento della chiamata.
     struct Gated {
         inner: Arc<FakeRunner>,
         needle: &'static str,
-        gate: futures::future::Shared<futures::channel::oneshot::Receiver<()>>,
+        gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     }
 
     impl Runner for Gated {
@@ -706,7 +835,7 @@ pub(super) mod tests {
         ) -> futures::future::BoxFuture<'static, Result<superzed_sources::RunOutput, superzed_sources::RunError>> {
             let line = std::iter::once(program.to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
             let result = self.inner.run(program, args, stdin);
-            let gate = line.contains(self.needle).then(|| self.gate.clone());
+            let gate = if line.contains(self.needle) { self.gate.lock().unwrap().take() } else { None };
             Box::pin(async move {
                 if let Some(gate) = gate {
                     gate.await.ok();
@@ -716,7 +845,16 @@ pub(super) mod tests {
         }
     }
 
-    /// Chat "k-1" (sessione "s-1") con un'attesa #212 "Vault password" aperta dal canvas.
+    /// `gh` che ferma il primo comando con `needle` finche' non si manda sul canale restituito.
+    fn gate(setup: &Setup, needle: &'static str, cx: &mut VisualTestContext) -> futures::channel::oneshot::Sender<()> {
+        let (open, gate) = futures::channel::oneshot::channel::<()>();
+        let gated = Arc::new(Gated { inner: setup.gh.clone(), needle, gate: std::sync::Mutex::new(Some(gate)) });
+        cx.update(|_, cx| superzed_done::init_test(cx, gated, FakeRunner::new(), Some(setup.dir.path().to_path_buf())));
+        open
+    }
+
+    /// Chat "k-1" (sessione "s-1") con l'attesa #212 "Staging API key for the mailer" registrata
+    /// dal canvas (gia' aperta su GitHub: si riusa).
     async fn with_open_wait(cx: &mut TestAppContext) -> (Setup, &'static mut VisualTestContext) {
         let (setup, cx) = setup(cx, true).await;
         setup.gh.on("gh issue list", ok(OPEN_212));
@@ -724,7 +862,7 @@ pub(super) mod tests {
         setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
         setup.gh.on("gh issue close", ok(""));
         chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
-        let (_, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "Basis"}), cx);
+        let (_, line) = wait(&setup, "k-1", json!({"title": "Staging API key for the mailer", "on": "Legal"}), cx);
         assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
         (setup, cx)
     }
@@ -736,7 +874,7 @@ pub(super) mod tests {
     #[gpui::test]
     async fn a_wait_closed_from_the_node_leaves_session_waits(cx: &mut TestAppContext) {
         let (setup, cx) = with_open_wait(cx).await;
-        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())]);
+        assert_eq!(waits(&setup, cx), vec![(212, "Staging API key for the mailer".to_string())]);
         setup.canvas.update(cx, |c, cx| c.close_waiting_item(212, cx));
         cx.run_until_parked();
         assert_eq!(setup.gh.count("gh issue close 212"), 1);
@@ -748,10 +886,10 @@ pub(super) mod tests {
     async fn a_wait_missing_from_a_later_fresh_read_leaves_session_waits(cx: &mut TestAppContext) {
         let (setup, cx) = with_open_wait(cx).await;
         refresh(&setup, cx);
-        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "ancora aperta su GitHub");
+        assert_eq!(waits(&setup, cx), vec![(212, "Staging API key for the mailer".to_string())], "ancora aperta su GitHub");
         setup.gh.on("gh issue list", fail(1, "HTTP 502: bad gateway"));
         refresh(&setup, cx);
-        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "una lettura fallita non dice niente");
+        assert_eq!(waits(&setup, cx), vec![(212, "Staging API key for the mailer".to_string())], "una lettura fallita non dice niente");
         // chiusa direttamente su GitHub
         setup.gh.on("gh issue list", ok("[]"));
         refresh(&setup, cx);
@@ -761,25 +899,25 @@ pub(super) mod tests {
 
     #[gpui::test]
     async fn a_refresh_started_before_the_wait_does_not_drop_it(cx: &mut TestAppContext) {
-        use futures::FutureExt as _;
         let (setup, cx) = setup(cx, true).await;
         // la lista letta dal giro gia' partito non contiene ancora la issue
         setup.gh.on("gh issue list", ok("[]"));
         setup.gh.on("gh label create", ok(""));
         setup.gh.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
         chat(&setup, "k-1", Some("s-1"), SessionTimes::default(), cx);
-        let (open, gate) = futures::channel::oneshot::channel::<()>();
-        let gated = Arc::new(Gated { inner: setup.gh.clone(), needle: "worktree list", gate: gate.shared() });
-        cx.update(|_, cx| superzed_done::init_test(cx, gated, FakeRunner::new(), Some(setup.dir.path().to_path_buf())));
+        let open = gate(&setup, "gh issue list", cx);
         setup.canvas.update(cx, |c, cx| c.refresh_status(cx));
         cx.run_until_parked();
-        assert!(setup.canvas.read_with(cx, |c, _| c.status_refreshing()), "giro fermo sui worktree");
-        let (_, line) = wait(&setup, "k-1", json!({"title": "Vault password", "on": "Basis"}), cx);
+        assert!(setup.canvas.read_with(cx, |c, _| c.status_refreshing()), "giro fermo con la lista vuota gia' letta");
+        let (_, line) = wait(&setup, "k-1", json!({"title": "Staging API key for the mailer", "on": "Legal"}), cx);
         assert_eq!(line, "ok #212 https://github.com/acme/acme_app/issues/212\n");
+        // finisce il giro partito prima (lista vuota), poi quello chiesto dall'attesa (con la issue)
+        setup.gh.on("gh issue list", ok(OPEN_212));
         open.send(()).unwrap();
         cx.run_until_parked();
-        assert!(matches!(waiting(&setup, cx), WaitingState::Fresh { ref items, .. } if items.is_empty()));
-        assert_eq!(waits(&setup, cx), vec![(212, "Vault password".to_string())], "il giro partito prima non la toglie");
+        assert!(matches!(waiting(&setup, cx), WaitingState::Fresh { ref items, .. } if numbers(items) == [212]));
+        assert_eq!(waits(&setup, cx), vec![(212, "Staging API key for the mailer".to_string())], "il giro partito prima non la toglie");
+        setup.gh.on("gh issue list", ok("[]"));
         refresh(&setup, cx);
         assert_eq!(waits(&setup, cx), vec![], "un giro partito dopo si'");
         close_all(&setup.canvas, cx);

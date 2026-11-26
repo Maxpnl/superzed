@@ -78,7 +78,13 @@ pub fn parse_left_right(text: &str) -> Option<(u32, u32)> {
 }
 
 fn git_arguments(directory: &Path, args: &[&str]) -> Vec<String> {
-    let mut full_args = vec!["-C".to_string(), directory.to_string_lossy().into_owned()];
+    let mut full_args = Vec::new();
+    // `status` gira ogni minuto in ogni worktree: senza questa opzione rinfresca l'indice
+    // prendendo index.lock, e una chat che committa in quel momento fallisce.
+    if args.first() == Some(&"status") {
+        full_args.push("--no-optional-locks".to_string());
+    }
+    full_args.extend(["-C".to_string(), directory.to_string_lossy().into_owned()]);
     full_args.extend(args.iter().map(|arg| arg.to_string()));
     full_args
 }
@@ -144,14 +150,14 @@ mod tests {
         futures::executor::block_on(future)
     }
 
-    const LIST: &str = "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\nworktree /repo.worktrees/bills\nHEAD 2222222222222222222222222222222222222222\nbranch refs/heads/feat/bills-at-source\n\nworktree /home/alice/gpm\nHEAD 3333333333333333333333333333333333333333\ndetached\n\nworktree /repo.worktrees/gone\nHEAD 4444444444444444444444444444444444444444\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n\nworktree /srv/bare.git\nbare\n";
+    const LIST: &str = "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\nworktree /repo.worktrees/search-filters\nHEAD 2222222222222222222222222222222222222222\nbranch refs/heads/feat/search-filters\n\nworktree /home/alice/release\nHEAD 3333333333333333333333333333333333333333\ndetached\n\nworktree /repo.worktrees/gone\nHEAD 4444444444444444444444444444444444444444\nbranch refs/heads/feat/gone\nprunable gitdir file points to non-existent location\n\nworktree /srv/bare.git\nbare\n";
 
     #[test]
     fn the_porcelain_list_is_parsed() {
         let w = parse_worktree_list(LIST);
         assert_eq!(w.len(), 4, "il bare non conta");
         assert_eq!((w[0].main, &w[0].head), (true, &Head::Branch("main".into())));
-        assert_eq!(w[1].head, Head::Branch("feat/bills-at-source".into()));
+        assert_eq!(w[1].head, Head::Branch("feat/search-filters".into()));
         assert_eq!(w[2].head, Head::Detached("3333333".into()));
         assert!(w[3].missing && !w[1].missing);
         assert_eq!(parse_left_right("41\t0\n"), Some((41, 0)));
@@ -163,16 +169,16 @@ mod tests {
         let r = FakeRunner::new();
         r.on("worktree list --porcelain", ok(LIST));
         r.on("symbolic-ref --short refs/remotes/origin/HEAD", ok("origin/main\n"));
-        r.on("-C /repo.worktrees/bills status --porcelain", ok(""));
-        r.on("-C /repo.worktrees/bills rev-list --left-right --count origin/main...HEAD", ok("41\t0\n"));
-        r.on("-C /repo.worktrees/bills log -1 --format=%ct", ok("1795400000\n"));
-        r.on("-C /home/alice/gpm status --porcelain", fail(128, "fatal: not a git repository"));
-        r.on("-C /home/alice/gpm describe --tags --exact-match", ok("1.0.96\n"));
-        r.on("-C /repo status --porcelain", ok(" M a.rs\n?? b.rs\n"));
+        r.on("git --no-optional-locks -C /repo.worktrees/search-filters status --porcelain", ok(""));
+        r.on("-C /repo.worktrees/search-filters rev-list --left-right --count origin/main...HEAD", ok("41\t0\n"));
+        r.on("-C /repo.worktrees/search-filters log -1 --format=%ct", ok("1795400000\n"));
+        r.on("git --no-optional-locks -C /home/alice/release status --porcelain", fail(128, "fatal: not a git repository"));
+        r.on("-C /home/alice/release describe --tags --exact-match", ok("2.3.0\n"));
+        r.on("git --no-optional-locks -C /repo status --porcelain", ok(" M a.rs\n?? b.rs\n"));
         let w = block_on(read_worktrees(&runner(&r), Path::new("/repo"))).unwrap();
         assert_eq!((w[0].dirty, w[0].merged()), (2, false));
         assert_eq!((w[1].ahead, w[1].behind, w[1].last_commit, w[1].merged()), (Some(0), Some(41), Some(1795400000), true));
-        assert_eq!((w[2].head.clone(), w[2].dirty, w[2].ahead, w[2].merged()), (Head::Detached("1.0.96".into()), 0, None, false));
+        assert_eq!((w[2].head.clone(), w[2].dirty, w[2].ahead, w[2].merged()), (Head::Detached("2.3.0".into()), 0, None, false));
         assert_eq!(r.count("-C /repo.worktrees/gone"), 0, "cartella sparita: nessun comando");
     }
 
@@ -192,6 +198,8 @@ mod tests {
         let w = block_on(read_worktrees(&runner(&r), Path::new("/repo"))).unwrap();
         assert!(w.iter().all(|worktree| worktree.ahead.is_none() && worktree.behind.is_none()));
         assert_eq!(r.count("rev-list"), 0);
+        assert_eq!(r.count("status --porcelain"), 3, "solo i worktree che ci sono");
+        assert_eq!(r.count("git --no-optional-locks -C "), 3, "nessuno status prende index.lock");
 
         let r = FakeRunner::new();
         r.on("worktree list --porcelain", fail(128, "fatal: not a git repository\n"));

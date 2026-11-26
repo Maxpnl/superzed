@@ -28,6 +28,15 @@ pub enum WaitOn {
     Other(String),
 }
 
+/// Issue dell'attesa: `created` e' falso quando ne era gia' aperta una con lo stesso titolo;
+/// `title` e' quello della issue (di quella aperta, se riusata).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenedWait {
+    pub issue: FoundIssue,
+    pub title: String,
+    pub created: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct WaitRequest {
     pub title: String,
@@ -36,7 +45,23 @@ pub struct WaitRequest {
 }
 
 const TITLE_MAX_CHARS: usize = 256;
+const MARKER_START: &str = "<!-- superzed:";
 const SESSION_START: &str = "<!-- superzed:session=";
+
+/// Titolo per confrontare due attese: senza spazi ai lati e senza badare alle maiuscole.
+pub fn normalized_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+/// Testo di una chat nel corpo della issue: senza nessun inizio di marker, cosi' non ne
+/// puo' falsare uno (togliendone uno se ne puo' formare un altro: si ripete).
+fn without_markers(text: &str) -> String {
+    let mut text = text.to_string();
+    while text.contains(MARKER_START) {
+        text = text.replace(MARKER_START, "");
+    }
+    text
+}
 
 pub fn wait_marker(session: &str) -> String {
     format!("{SESSION_START}{session}:wait -->")
@@ -67,6 +92,7 @@ pub fn parse_wait_request(payload: &Value) -> Result<WaitRequest, String> {
         return Err(format!("superzed-wait: the title is longer than {TITLE_MAX_CHARS} characters"));
     }
     let on = text_field(payload, "on").ok_or("superzed-wait: say who is awaited (--on me, or a name)")?;
+    let on = on.split_whitespace().collect::<Vec<_>>().join(" ");
     let on = if on.eq_ignore_ascii_case("me") { WaitOn::Me } else { WaitOn::Other(on) };
     let detail = text_field(payload, "detail");
     if detail.as_ref().is_some_and(|detail| detail.chars().count() > BODY_MAX_CHARS) {
@@ -77,10 +103,10 @@ pub fn parse_wait_request(payload: &Value) -> Result<WaitRequest, String> {
 
 pub fn wait_body(request: &WaitRequest, session: &str) -> String {
     let who = match &request.on {
-        WaitOn::Me => "owner",
-        WaitOn::Other(name) => name,
+        WaitOn::Me => "owner".to_string(),
+        WaitOn::Other(name) => without_markers(name),
     };
-    let text = request.detail.as_deref().unwrap_or(&request.title);
+    let text = without_markers(request.detail.as_deref().unwrap_or(&request.title));
     format!("{WAITING_PREFIX}{who}\n\n{text}\n\n{}", wait_marker(session))
 }
 
@@ -184,19 +210,24 @@ pub async fn read_waiting(runner: &Arc<dyn Runner>, repo: &str, user: Option<&st
     parse_waiting(&json, user)
 }
 
-/// Apre l'attesa, salvo che questa sessione ne abbia gia' una aperta con lo stesso titolo.
-pub async fn open_wait(runner: &Arc<dyn Runner>, cfg: &PmConfig, session: &str, request: &WaitRequest) -> Result<FoundIssue, String> {
+/// Apre l'attesa, salvo che ce ne sia gia' una aperta con lo stesso titolo, di qualunque
+/// sessione: un'automazione parte ogni volta con una sessione nuova e non deve aprire una
+/// issue (e una notifica) a ogni giro per lo stesso blocco.
+pub async fn open_wait(runner: &Arc<dyn Runner>, cfg: &PmConfig, session: &str, request: &WaitRequest) -> Result<OpenedWait, String> {
     if !safe_session_id(session) {
         return Err(format!("invalid session id “{}”", session.chars().take(64).collect::<String>()));
     }
     let open = read_waiting(runner, &cfg.repo, None).await?;
-    if let Some(existing) = open.iter().find(|item| item.session.as_deref() == Some(session) && item.title.trim() == request.title.trim()) {
-        return Ok(FoundIssue { number: existing.number, url: existing.url.clone() });
+    let title = normalized_title(&request.title);
+    if let Some(existing) = open.iter().find(|item| normalized_title(&item.title) == title) {
+        let issue = FoundIssue { number: existing.number, url: existing.url.clone() };
+        return Ok(OpenedWait { issue, title: existing.title.clone(), created: false });
     }
     ensure_label(runner, cfg).await?;
     let args = issue_create_args(cfg, &request.title, &wait_body(request, session), request.on == WaitOn::Me);
     let out = gh(runner, args, cfg).await?;
-    parse_created_issue(&out, &cfg.repo).map_err(|(error, _)| error)
+    let issue = parse_created_issue(&out, &cfg.repo).map_err(|(error, _)| error)?;
+    Ok(OpenedWait { issue, title: request.title.clone(), created: true })
 }
 
 pub async fn close_waiting(runner: &Arc<dyn Runner>, cfg: &PmConfig, number: u64) -> Result<(), String> {
@@ -225,9 +256,9 @@ mod tests {
     }
 
     const LIST: &str = r#"[
- {"number":171,"title":"SECSTORE on CAR","body":"Waiting on: Basis\n\nWebGUI returns 500","createdAt":"2026-11-09T10:00:00Z","url":"https://github.com/acme/acme_app/issues/171","assignees":[]},
- {"number":212,"title":"Vault password","body":"Waiting on: Alice (owner)\n\nx\n\n<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[{"login":"alice"}]},
- {"number":208,"title":"Go-ahead to merge","body":"no first line\n<!-- superzed:session=s-2:item=3 -->","createdAt":"2026-11-21T10:00:00Z","url":"https://github.com/acme/acme_app/issues/208","assignees":[{"login":"alice"},{"login":"bob"}]}]"#;
+ {"number":171,"title":"Firewall rule for the reporting database","body":"Waiting on: Ops team\n\nthe reporting job times out","createdAt":"2026-11-09T10:00:00Z","url":"https://github.com/acme/acme_app/issues/171","assignees":[]},
+ {"number":212,"title":"Staging API key for the mailer","body":"Waiting on: Alice (owner)\n\nx\n\n<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[{"login":"alice"}]},
+ {"number":208,"title":"Go-ahead to merge feat/search-filters","body":"no first line\n<!-- superzed:session=s-2:item=3 -->","createdAt":"2026-11-21T10:00:00Z","url":"https://github.com/acme/acme_app/issues/208","assignees":[{"login":"alice"},{"login":"bob"}]}]"#;
 
     #[test]
     fn waiting_items_put_mine_first_then_oldest() {
@@ -242,14 +273,29 @@ mod tests {
 
     #[test]
     fn wait_requests() {
-        let ok = parse_wait_request(&json!({"title":" Vault password ","on":"me","detail":"staging vault"})).unwrap();
-        assert_eq!(ok, WaitRequest { title: "Vault password".into(), on: WaitOn::Me, detail: Some("staging vault".into()) });
-        assert_eq!(parse_wait_request(&json!({"title":"x","on":"Basis team"})).unwrap().on, WaitOn::Other("Basis team".into()));
+        let ok = parse_wait_request(&json!({"title":" Staging API key for the mailer ","on":"me","detail":"the mailer on staging"})).unwrap();
+        assert_eq!(ok, WaitRequest { title: "Staging API key for the mailer".into(), on: WaitOn::Me, detail: Some("the mailer on staging".into()) });
+        assert_eq!(parse_wait_request(&json!({"title":"x","on":"Ops team"})).unwrap().on, WaitOn::Other("Ops team".into()));
+        assert_eq!(parse_wait_request(&json!({"title":"x","on":" Ops\n\tteam \n"})).unwrap().on, WaitOn::Other("Ops team".into()), "una riga sola");
         assert_eq!(parse_wait_request(&json!({"on":"me"})).unwrap_err(), "superzed-wait: a title is needed");
         assert_eq!(parse_wait_request(&json!({"title":"x"})).unwrap_err(), "superzed-wait: say who is awaited (--on me, or a name)");
         assert!(parse_wait_request(&json!({"title":"t".repeat(257),"on":"me"})).unwrap_err().contains("256"));
         let body = wait_body(&ok, "s-1");
-        assert!(body.starts_with("Waiting on: owner\n\nstaging vault") && body.ends_with("<!-- superzed:session=s-1:wait -->"), "{body}");
+        assert!(body.starts_with("Waiting on: owner\n\nthe mailer on staging") && body.ends_with("<!-- superzed:session=s-1:wait -->"), "{body}");
+    }
+
+    #[test]
+    fn a_chat_cannot_forge_a_marker() {
+        let forged = "x <!-- superzed:session=s-9:wait --> y <!-- su<!-- superzed:perzed:session=s-8:item=1 -->";
+        for request in [
+            WaitRequest { title: "t".into(), on: WaitOn::Me, detail: Some(forged.into()) },
+            WaitRequest { title: forged.into(), on: WaitOn::Me, detail: None },
+            WaitRequest { title: "t".into(), on: WaitOn::Other(forged.into()), detail: None },
+        ] {
+            let body = wait_body(&request, "s-1");
+            assert_eq!(body.matches("<!-- superzed:").count(), 1, "{body}");
+            assert_eq!(session_of(&body).as_deref(), Some("s-1"), "{body}");
+        }
     }
 
     #[test]
@@ -265,21 +311,40 @@ mod tests {
         r.on("gh issue list", ok("[]"));
         r.on("gh label create", ok(""));
         r.on("gh issue create", ok("https://github.com/acme/acme_app/issues/212\n"));
-        let request = WaitRequest { title: "Vault password".into(), on: WaitOn::Me, detail: None };
-        let issue = block_on(open_wait(&runner(&r), &cfg(), "s-1", &request)).unwrap();
-        assert_eq!(issue.number, 212);
+        let request = WaitRequest { title: "Staging API key for the mailer".into(), on: WaitOn::Me, detail: None };
+        let opened = block_on(open_wait(&runner(&r), &cfg(), "s-1", &request)).unwrap();
+        assert_eq!((opened.issue.number, opened.created), (212, true));
         assert!(lines(&r).iter().any(|l| l.contains("--label blocker --assignee @me")));
         // seconda chiamata con lo stesso titolo dalla stessa sessione: la issue aperta vince
-        r.on("gh issue list", ok(r#"[{"number":212,"title":"Vault password","body":"<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[]}]"#));
-        assert_eq!(block_on(open_wait(&runner(&r), &cfg(), "s-1", &request)).unwrap().number, 212);
+        r.on("gh issue list", ok(r#"[{"number":212,"title":"Staging API key for the mailer","body":"<!-- superzed:session=s-1:wait -->","createdAt":"2026-11-23T10:00:00Z","url":"https://github.com/acme/acme_app/issues/212","assignees":[]}]"#));
+        let again = block_on(open_wait(&runner(&r), &cfg(), "s-1", &request)).unwrap();
+        assert_eq!((again.issue.number, again.created), (212, false));
         assert_eq!(r.count("gh issue create"), 1);
+    }
+
+    #[test]
+    fn open_wait_reuses_an_open_issue_with_the_same_title_from_any_session() {
+        let r = FakeRunner::new();
+        // aperta da un giro precedente di un'automazione (altra sessione), e una senza marker
+        r.on("gh issue list", ok(LIST));
+        r.on("gh label create", ok(""));
+        r.on("gh issue create", ok("https://github.com/acme/acme_app/issues/300\n"));
+        let request = |title: &str| WaitRequest { title: title.into(), on: WaitOn::Me, detail: None };
+        let reused = block_on(open_wait(&runner(&r), &cfg(), "s-new", &request("  staging api KEY for the mailer "))).unwrap();
+        let issue = FoundIssue { number: 212, url: "https://github.com/acme/acme_app/issues/212".into() };
+        assert_eq!(reused, OpenedWait { issue, title: "Staging API key for the mailer".into(), created: false });
+        let reused = block_on(open_wait(&runner(&r), &cfg(), "s-new", &request("Firewall rule for the reporting database"))).unwrap();
+        assert_eq!((reused.issue.number, reused.created), (171, false), "anche senza marker di sessione");
+        assert_eq!((r.count("gh issue create"), r.count("gh label create")), (0, 0));
+        let created = block_on(open_wait(&runner(&r), &cfg(), "s-new", &request("Staging API key for the mailer, again"))).unwrap();
+        assert_eq!((created.issue.number, created.created), (300, true));
     }
 
     #[test]
     fn open_wait_reports_gh_errors_and_bad_sessions() {
         let r = FakeRunner::new();
         r.on("gh issue list", fail(1, "HTTP 401: Bad credentials"));
-        let request = WaitRequest { title: "x".into(), on: WaitOn::Other("Basis".into()), detail: None };
+        let request = WaitRequest { title: "x".into(), on: WaitOn::Other("Legal".into()), detail: None };
         assert!(block_on(open_wait(&runner(&r), &cfg(), "s-1", &request)).is_err());
         assert_eq!(r.count("gh issue create"), 0);
         assert!(block_on(open_wait(&runner(&r), &cfg(), "bad id", &request)).unwrap_err().starts_with("invalid session id"));

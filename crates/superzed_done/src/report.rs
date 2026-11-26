@@ -404,8 +404,8 @@ mod tests {
         let report = parse_report(r#"{"area":"frontend","done":["x"]}"#, "s-1").unwrap();
         assert_eq!(report.done, ["x"]);
         assert!(!report_json(&report).contains("\"area\""));
-        let prompt = headless_prompt("s-1", &[(12, "Vault password".into())]);
-        assert!(prompt.contains("#12 «Vault password»"), "{prompt}");
+        let prompt = headless_prompt("s-1", &[(12, "Staging API key for the mailer".into())]);
+        assert!(prompt.contains("#12 «Staging API key for the mailer»"), "{prompt}");
         assert!(!prompt.contains("\"area\"") && !prompt.contains("aree"), "{prompt}");
         assert!(prompt.contains("non le attese su CI, job o altre macchine"), "{prompt}");
         assert!(!headless_prompt("s-1", &[]).contains("attese aperte"));

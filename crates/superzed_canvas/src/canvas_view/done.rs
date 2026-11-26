@@ -25,6 +25,7 @@ pub const REPORT_POLL: Duration = Duration::from_secs(2);
 /// si passa a `claude -p` senza aspettare `REPORT_WAIT`.
 pub const IDLE_GRACE: Duration = Duration::from_secs(30);
 
+pub const STATUS_READING_WAITS: &str = "report: reading the open waits";
 pub const STATUS_WAITING: &str = "report: waiting for the chat to be free";
 pub const STATUS_PROMPTED: &str = "report: asked the chat";
 pub const STATUS_HEADLESS: &str = "report: claude -p running";
@@ -53,7 +54,7 @@ pub enum DoneLevel {
 pub fn done_status_view(status: &str) -> (&'static str, DoneLevel, String) {
     let detail = capitalize(status);
     match status {
-        STATUS_WAITING | STATUS_PROMPTED | STATUS_HEADLESS => ("Report in progress…", DoneLevel::InProgress, detail),
+        STATUS_READING_WAITS | STATUS_WAITING | STATUS_PROMPTED | STATUS_HEADLESS => ("Report in progress…", DoneLevel::InProgress, detail),
         STATUS_WRITING => ("Writing to GitHub…", DoneLevel::InProgress, detail),
         STATUS_READY => (
             "Report ready",
@@ -99,6 +100,8 @@ pub(crate) fn write_running(root: &Path, session_id: &str, cx: &App) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoneStage {
+    /// Lettura delle attese aperte da GitHub, prima di costruire il prompt.
+    ReadingWaits,
     /// La chat e' occupata (o claude parte): si aspetta.
     WaitingChat,
     /// Prompt scritto: si aspetta il file.
@@ -417,6 +420,40 @@ impl CanvasView {
             self.set_done_status(node, report_failed_status(&e), cx);
             return;
         }
+        // senza un giro riuscito del nodo Stato (dopo un riavvio, o senza nodo) le attese
+        // aperte della sessione non si conoscono: il modello le riproporrebbe come blocker nuovi
+        if !matches!(self.status_waiting(), WaitingState::Fresh { .. })
+            && let Some(read) = self.read_waiting_once(&root, cx)
+        {
+            let task = cx.spawn(async move |this, cx| {
+                let read = read.await;
+                this.update(cx, |c, cx| c.done_waits_read(node, automatic, read, cx)).ok();
+            });
+            self.done_pipeline.runs.insert(
+                node,
+                DoneRun { session_id, root, stage: DoneStage::ReadingWaits, polls: 0, idle_polls: 0, _enter: None, _task: task },
+            );
+            self.set_done_status(node, STATUS_READING_WAITS, cx);
+            return;
+        }
+        self.ask_report(node, automatic, session_id, root, cx);
+    }
+
+    /// Attese lette (o no: si va avanti con quello che si sa), poi il report.
+    fn done_waits_read(&mut self, node: NodeId, automatic: bool, read: Result<Vec<superzed_done::WaitingItem>, String>, cx: &mut Context<Self>) {
+        let Some(run) = self.done_pipeline.runs.remove(&node) else {
+            return;
+        };
+        match read {
+            Ok(items) => self.waiting_read_once(items, cx),
+            Err(error) => log::debug!("superzed done: open waits not read, the report prompt uses what is known: {error}"),
+        }
+        self.ask_report(node, automatic, run.session_id, run.root, cx);
+    }
+
+    /// Il report nel PTY se claude e' libero, dopo se e' occupato o sta partendo, subito con
+    /// `claude -p` se non c'e' o se Fatto e' arrivato da solo.
+    fn ask_report(&mut self, node: NodeId, automatic: bool, session_id: String, root: PathBuf, cx: &mut Context<Self>) {
         let readiness = self.chat_readiness(node, cx);
         if automatic || (readiness == Readiness::Unavailable && !self.chat_starting(node, cx)) {
             self.start_headless(node, session_id, root, cx);
@@ -512,7 +549,7 @@ impl CanvasView {
                     false
                 }
             },
-            DoneStage::Headless => false,
+            DoneStage::ReadingWaits | DoneStage::Headless => false,
         }
     }
 
@@ -747,7 +784,7 @@ pub(crate) mod tests {
 
     #[test]
     fn done_status_maps_to_short_text_level_and_detail() {
-        for status in [STATUS_WAITING, STATUS_PROMPTED, STATUS_HEADLESS] {
+        for status in [STATUS_READING_WAITS, STATUS_WAITING, STATUS_PROMPTED, STATUS_HEADLESS] {
             let (text, level, detail) = done_status_view(status);
             assert_eq!((text, level), ("Report in progress…", DoneLevel::InProgress), "{status}");
             assert!(detail.starts_with("Report: "), "dettaglio tecnico nel tooltip: {detail}");
@@ -917,6 +954,28 @@ pub(crate) mod tests {
         assert!(chat.claude.calls().is_empty());
         tick(1, cx);
         assert!(wait_for_file(&pty(&chat), "\x1b[201~\r", cx).ends_with("\x1b[201~\r"), "poi Invio");
+        close_all(&chat.canvas, cx);
+    }
+
+    /// Dopo un riavvio, senza nodo Stato: le attese aperte della sessione si leggono una
+    /// volta da GitHub prima del prompt, che le elenca; nessun giro periodico parte.
+    #[gpui::test]
+    async fn without_a_status_node_the_prompt_lists_the_open_waits_read_once(cx: &mut TestAppContext) {
+        let (chat, cx) = done_chat(cx, true).await;
+        let open = serde_json::json!([{
+            "number": 305, "title": "Staging API key for the mailer",
+            "body": format!("Waiting on: owner\n\nx\n\n<!-- superzed:session={SID}:wait -->"),
+            "createdAt": "2026-11-23T10:00:00Z", "url": "https://github.com/acme/acme_app/issues/305", "assignees": []
+        }]);
+        chat.gh.on("gh issue list -R acme/acme_app --label blocker", ok(&open.to_string()));
+        assert_eq!(chat.canvas.read_with(cx, |c, _| (c.status_node(), c.session_waits(SID))), (None, vec![]));
+        to_done(&chat, cx);
+        let text = wait_for_file(&pty(&chat), "\x1b[201~", cx);
+        assert!(text.contains("#305 «Staging API key for the mailer»"), "{text:?}");
+        assert_eq!(status(&chat, cx).as_deref(), Some(STATUS_PROMPTED));
+        assert_eq!(chat.gh.count("--label blocker"), 1);
+        tick(wait_polls() - 1, cx);
+        assert_eq!(chat.gh.count("--label blocker"), 1, "una lettura sola, nessun giro ogni minuto");
         close_all(&chat.canvas, cx);
     }
 
@@ -1339,6 +1398,7 @@ pub(crate) mod tests {
         write_report_file(&chat, REPORT_JSON);
         tick(1, cx);
         let action = notifications(cx)[0].action.clone().expect("Rivedi");
+        let gh_calls = chat.gh.calls().len();
         chat.canvas.update_in(cx, |c, window, cx| c.open_notification_action(&action, window, cx));
         cx.run_until_parked();
         assert!(review_open(&chat, cx));
@@ -1349,7 +1409,7 @@ pub(crate) mod tests {
         chat.canvas.update_in(cx, |c, window, cx| c.github_for_node(chat.node, window, cx));
         cx.run_until_parked();
         assert!(review_open(&chat, cx), "GitHub… con il report pronto: anteprima");
-        assert!(chat.gh.calls().is_empty(), "aprire l'anteprima non chiama gh");
+        assert_eq!(chat.gh.calls().len(), gh_calls, "aprire l'anteprima non chiama gh");
         close_all(&chat.canvas, cx);
     }
 

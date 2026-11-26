@@ -519,7 +519,7 @@ mod tests {
         let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let out = run_args(
             &script,
-            &["--on", "me", "--title", "Vault \"staging\" password", "--detail", "riga 1\nriga 2"],
+            &["--on", "me", "--title", "Staging \"mailer\" API key", "--detail", "riga 1\nriga 2"],
             &env,
             "",
         );
@@ -532,7 +532,7 @@ mod tests {
         assert_eq!((msg.channel, msg.node_key.as_str()), (Channel::Wait, "node-3"));
         assert_eq!(
             msg.payload,
-            serde_json::json!({"title": "Vault \"staging\" password", "on": "me", "detail": "riga 1\nriga 2"})
+            serde_json::json!({"title": "Staging \"mailer\" API key", "on": "me", "detail": "riga 1\nriga 2"})
         );
     }
 

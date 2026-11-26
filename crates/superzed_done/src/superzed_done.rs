@@ -25,8 +25,9 @@ pub use report::{
 pub use result::{FoundIssue, ItemOutcome, ItemReport, REPORT_CHANGED, ReviewSource, RunResult, review_source};
 
 pub use waiting::{
-    WAITING_FILE, WaitOn, WaitRequest, WaitingItem, close_waiting, gh_user, open_wait, parse_wait_request, parse_waiting,
-    parse_waiting_file, read_waiting, session_of, wait_body, wait_marker, waiting_file_json, waiting_list_args,
+    OpenedWait, WAITING_FILE, WaitOn, WaitRequest, WaitingItem, close_waiting, gh_user, normalized_title, open_wait,
+    parse_wait_request, parse_waiting, parse_waiting_file, read_waiting, session_of, wait_body, wait_marker,
+    waiting_file_json, waiting_list_args,
 };
 
 pub use headless::{

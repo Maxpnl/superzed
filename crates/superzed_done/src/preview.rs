@@ -567,9 +567,9 @@ mod tests {
     fn only_blockers_become_issues_and_keep_their_marker_index() {
         let report = parse_report(
             r#"{"missing":["m0","m1"],"problems":["p0"],"blockers":[
-            {"title":"Vault password","waiting_on":"Alice (owner)"},
+            {"title":"Staging API key for the mailer","waiting_on":"Alice (owner)"},
             {"title":"e2e still queued","waiting_on":"GitHub Actions"},
-            {"title":"SECSTORE","waiting_on":"Basis team"},
+            {"title":"Firewall rule for the reporting database","waiting_on":"Ops team"},
             {"title":"No one named"}]}"#,
             "s-1",
         )
@@ -577,8 +577,8 @@ mod tests {
         let preview = Preview::from_report(&report, &RunResult::default());
         let seen: Vec<_> = preview.new_issues.iter().map(|n| (n.item, n.title.as_str(), n.assign_me, n.enabled)).collect();
         // gli indici restano quelli di prima (missing, problems, blockers): i marker gia' scritti valgono ancora
-        assert_eq!(seen, [(3, "Vault password", true, true), (4, "e2e still queued", false, false), (5, "SECSTORE", false, true), (6, "No one named", false, true)]);
-        assert_eq!(preview.new_issues[0].body, "Waiting on: Alice (owner)\n\nVault password");
+        assert_eq!(seen, [(3, "Staging API key for the mailer", true, true), (4, "e2e still queued", false, false), (5, "Firewall rule for the reporting database", false, true), (6, "No one named", false, true)]);
+        assert_eq!(preview.new_issues[0].body, "Waiting on: Alice (owner)\n\nStaging API key for the mailer");
         assert_eq!(preview.new_issues[3].body, "No one named");
     }
 
@@ -587,13 +587,13 @@ mod tests {
         for w in ["GitHub Actions", "CI", "the nightly job", "build pipeline", "runner"] {
             assert!(machine_wait(w), "{w}");
         }
-        for w in ["Alice (owner)", "decisione dell'owner", "Basis team", "HR"] {
+        for w in ["Alice (owner)", "decisione dell'owner", "Ops team", "Legal"] {
             assert!(!machine_wait(w), "{w}");
         }
         for w in ["Alice (owner)", "via dell'owner", "Owner"] {
             assert!(owner_wait(w), "{w}");
         }
-        for w in ["Basis team", "ownership review"] {
+        for w in ["Ops team", "ownership review"] {
             assert!(!owner_wait(w), "{w}");
         }
     }

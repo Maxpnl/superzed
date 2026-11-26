@@ -56,8 +56,9 @@ pub fn issue_create_args(cfg: &PmConfig, title: &str, body: &str, assign_me: boo
     args
 }
 
+/// Aggiunge anche l'etichetta: un blocker creato prima che esistesse non comparirebbe fra le attese.
 pub fn issue_edit_args(cfg: &PmConfig, number: u64, title: &str, body: &str) -> Vec<String> {
-    s(&["issue", "edit", &number.to_string(), "--repo", &cfg.repo, &format!("--title={title}"), &format!("--body={body}")])
+    s(&["issue", "edit", &number.to_string(), "--repo", &cfg.repo, &format!("--title={title}"), &format!("--body={body}"), "--add-label", BLOCKER_LABEL])
 }
 
 /// Aggiornamento di una issue per link (una issue creata fuori dal repo della config).
@@ -285,7 +286,7 @@ mod tests {
         assert_eq!(strs(&hostile), ["issue", "create", "-R", "acme/acme_app", "--title=--fai-danni", "--body=$(rm -rf ~)\n\"x\" 'y'", "--label", "blocker"]);
         let assigned = issue_create_args(&cfg(), "t", "b", true);
         assert_eq!(strs(&assigned), ["issue", "create", "-R", "acme/acme_app", "--title=t", "--body=b", "--label", "blocker", "--assignee", "@me"]);
-        assert_eq!(strs(&issue_edit_args(&cfg(), 40, "t", "b")), ["issue", "edit", "40", "--repo", "acme/acme_app", "--title=t", "--body=b"]);
+        assert_eq!(strs(&issue_edit_args(&cfg(), 40, "t", "b")), ["issue", "edit", "40", "--repo", "acme/acme_app", "--title=t", "--body=b", "--add-label", "blocker"]);
         assert_eq!(strs(&comment_args(&cfg(), 12, "-n")), ["issue", "comment", "12", "--repo", "acme/acme_app", "--body=-n"]);
         assert_eq!(strs(&close_args(&cfg(), 12, None)), ["issue", "close", "12", "--repo", "acme/acme_app"]);
         assert_eq!(strs(&close_args(&cfg(), 12, Some("fatto"))), ["issue", "close", "12", "--repo", "acme/acme_app", "--comment=fatto"]);
@@ -327,7 +328,7 @@ mod tests {
     #[test]
     fn a_new_blocker_is_labelled_and_assigned_without_touching_a_project() {
         let r = write_runner();
-        let out = run(&r, vec![draft(3, "Vault password", true)], BTreeMap::new());
+        let out = run(&r, vec![draft(3, "Staging API key for the mailer", true)], BTreeMap::new());
         assert!(out[0].result.is_ok(), "{out:?}");
         let l = lines(&r);
         assert!(l.contains(&"gh label create blocker -R acme/acme_app --description Waiting on a person --color D93F0B".to_string()), "{l:?}");
@@ -362,6 +363,10 @@ mod tests {
         let out = run(&r, vec![draft(0, "Test", false), draft(1, "Formato", false)], BTreeMap::new());
         assert_eq!(out[0].issue.as_ref().map(|i| i.number), Some(40));
         assert_eq!(r.count("gh issue edit 40 --repo acme/acme_app --title=Test"), 1);
+        let l = lines(&r);
+        let edit = l.iter().position(|line| line.starts_with("gh issue edit 40")).unwrap();
+        assert!(l[edit].ends_with("--add-label blocker"), "un blocker di prima prende l'etichetta: {}", l[edit]);
+        assert!(l.iter().position(|line| line.starts_with("gh label create")).unwrap() < edit, "{l:?}");
         assert_eq!(r.count("gh issue create"), 1, "solo la voce 1, che non c'era");
         assert_eq!(r.count("gh issue list"), 1, "una ricerca per esecuzione");
         assert_eq!(r.count("gh label create"), 1, "una sola etichetta per esecuzione");

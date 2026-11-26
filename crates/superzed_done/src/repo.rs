@@ -26,6 +26,19 @@ pub fn parse_github_repo(url: &str) -> Option<String> {
     Some(format!("{owner}/{name}"))
 }
 
+/// URL da mostrare: senza `utente:token@` (un remote https puo' portarsi le credenziali).
+/// La forma scp-like (`git@host:percorso`) non ha password e resta com'e'.
+fn without_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..authority_end].rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://{host}{}", &rest[authority_end..]),
+        None => url.to_string(),
+    }
+}
+
 /// Cartella con il file `config` di git: in un worktree collegato `.git` e' un file
 /// `gitdir: <admin>` e la config vive nella cartella indicata da `<admin>/commondir`.
 fn common_git_dir(root: &Path) -> Result<PathBuf, String> {
@@ -63,7 +76,7 @@ pub fn repo_of(root: &Path) -> Result<String, String> {
         }
     }
     let url = origin_url.ok_or_else(|| "no GitHub remote: origin is not configured".to_string())?;
-    parse_github_repo(&url).ok_or_else(|| format!("no GitHub remote: origin is {url}"))
+    parse_github_repo(&url).ok_or_else(|| format!("no GitHub remote: origin is {}", without_userinfo(&url)))
 }
 
 /// Config per `gh`: owner e repo dall'origin; senza Project (numero 0) e senza soglia di stale.
@@ -106,6 +119,8 @@ mod tests {
         assert_eq!(repo_of(dir.path()).unwrap(), "acme/acme_app");
         std::fs::write(dir.path().join(".git/config"), "[remote \"origin\"]\n\turl = git@gitlab.com:acme/acme_app.git\n").unwrap();
         assert_eq!(repo_of(dir.path()).unwrap_err(), "no GitHub remote: origin is git@gitlab.com:acme/acme_app.git");
+        std::fs::write(dir.path().join(".git/config"), "[remote \"origin\"]\n\turl = https://alice:ghp_secret@gitlab.com/acme/acme_app.git\n").unwrap();
+        assert_eq!(repo_of(dir.path()).unwrap_err(), "no GitHub remote: origin is https://gitlab.com/acme/acme_app.git", "niente credenziali");
         std::fs::write(dir.path().join(".git/config"), "[core]\n\tbare = false\n").unwrap();
         assert_eq!(repo_of(dir.path()).unwrap_err(), "no GitHub remote: origin is not configured");
     }

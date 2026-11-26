@@ -279,8 +279,8 @@ pub async fn save_project_file(fs: &dyn Fs, root: &Path, file: &ProjectFile) -> 
     fs.atomic_write(path, text).await
 }
 
-const WAITING_IGNORE: &str = "waiting.json";
-const PROJECT_GITIGNORE: &str = "/project.json\n/project.json.bak*\nwaiting.json\n";
+const WAITING_IGNORE: &str = "/waiting.json";
+const PROJECT_GITIGNORE: &str = "/project.json\n/project.json.bak*\n/waiting.json\n";
 
 /// Claude Code allega a ogni risultato di Bash il diff dei file non ignorati da git che
 /// sono cambiati nel frattempo: senza questo, ogni pan, zoom o spostamento di un nodo
@@ -293,7 +293,7 @@ async fn ensure_ignored(fs: &dyn Fs, dir: &Path) -> anyhow::Result<()> {
         return fs.atomic_write(path, PROJECT_GITIGNORE.to_string()).await;
     }
     let text = fs.load(&path).await?;
-    if text.lines().map(str::trim).any(|line| line == WAITING_IGNORE || line.strip_prefix('/') == Some(WAITING_IGNORE)) {
+    if text.lines().map(str::trim).any(|line| line == WAITING_IGNORE || Some(line) == WAITING_IGNORE.strip_prefix('/')) {
         return Ok(());
     }
     let separator = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
@@ -478,7 +478,7 @@ mod tests {
 
         fs.insert_tree("/other", json!({ ".superzed": { ".gitignore": "mine" } })).await;
         save_project_file(fs.as_ref(), Path::new("/other"), &sample()).await.unwrap();
-        assert_eq!(fs.load(Path::new("/other/.superzed/.gitignore")).await.unwrap(), "mine\nwaiting.json\n");
+        assert_eq!(fs.load(Path::new("/other/.superzed/.gitignore")).await.unwrap(), "mine\n/waiting.json\n");
     }
 
     #[gpui::test]
@@ -487,11 +487,14 @@ mod tests {
         fs.insert_tree("/repo", json!({ ".superzed": { ".gitignore": "project.json\n" } })).await;
         let dir = Path::new("/repo/.superzed");
         ensure_ignored(fs.as_ref(), dir).await.unwrap();
-        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\nwaiting.json\n");
+        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\n/waiting.json\n");
         ensure_ignored(fs.as_ref(), dir).await.unwrap();
-        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\nwaiting.json\n");
+        assert_eq!(fs.load(&dir.join(".gitignore")).await.unwrap(), "project.json\n/waiting.json\n");
 
-        assert!(PROJECT_GITIGNORE.lines().any(|line| line == "waiting.json"), "{PROJECT_GITIGNORE}");
+        assert!(PROJECT_GITIGNORE.lines().any(|line| line == "/waiting.json"), "{PROJECT_GITIGNORE}");
+        fs.insert_tree("/old", json!({ ".superzed": { ".gitignore": "waiting.json\n" } })).await;
+        ensure_ignored(fs.as_ref(), Path::new("/old/.superzed")).await.unwrap();
+        assert_eq!(fs.load(Path::new("/old/.superzed/.gitignore")).await.unwrap(), "waiting.json\n", "una riga senza / basta");
         fs.insert_tree("/new", json!({ ".superzed": {} })).await;
         ensure_ignored(fs.as_ref(), Path::new("/new/.superzed")).await.unwrap();
         assert_eq!(fs.load(Path::new("/new/.superzed/.gitignore")).await.unwrap(), PROJECT_GITIGNORE);
